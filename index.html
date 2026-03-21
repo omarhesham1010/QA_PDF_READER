@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF QA Teaching System</title>
+  <meta name="description"
+    content="Convert PDF exam sheets with MCQ questions into a structured dataset for teachers." />
+
+  <!-- pdf.js CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- jszip CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <!-- FileSaver CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+
+  <!-- Google Font -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cairo:wght@400;600;700&display=swap"
+    rel="stylesheet" />
+
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+
+<body>
+
+  <!-- ========== TOP BAR ========== -->
+  <header id="topbar">
+    <!-- Brand -->
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <line x1="16" y1="13" x2="8" y2="13" />
+        <line x1="16" y1="17" x2="8" y2="17" />
+        <polyline points="10 9 9 9 8 9" />
+      </svg>
+      PDF QA System
+    </div>
+
+    <!-- File name -->
+    <span id="fileName">لم يتم تحميل ملف</span>
+
+    <!-- Upload button -->
+    <button id="uploadBtn" onclick="document.getElementById('pdfInput').click()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="17 8 12 3 7 8" />
+        <line x1="12" y1="3" x2="12" y2="15" />
+      </svg>
+      رفع PDF
+    </button>
+    <input type="file" id="pdfInput" accept=".pdf" />
+
+    <!-- Export button -->
+    <button id="exportBtn" disabled onclick="exportZip()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
+      </svg>
+      تصدير ZIP
+    </button>
+  </header>
+
+  <!-- ========== LAYOUT ========== -->
+  <div id="layout">
+
+    <!-- LEFT SIDEBAR: Question list -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        الأسئلة
+        <span id="question-count">0</span>
+      </div>
+      <div id="question-list">
+        <!-- Question items injected by JS -->
+      </div>
+    </aside>
+
+    <!-- CENTER: Question viewer -->
+    <main id="center">
+
+      <!-- Progress -->
+      <div id="progress-container">
+        <span id="progress-label">جاري المعالجة...</span>
+        <div id="progress-bar-wrap">
+          <div id="progress-bar"></div>
+        </div>
+      </div>
+
+      <!-- Empty state -->
+      <div id="empty-state">
+        <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+        </svg>
+        <h2>ابدأ برفع ملف PDF</h2>
+        <p>قم برفع ورقة الأسئلة بصيغة PDF وسيتم اكتشاف الأسئلة تلقائياً.</p>
+      </div>
+
+      <!-- Question viewer -->
+      <div id="question-viewer">
+        <span id="q-title">السؤال 1</span>
+        <div id="q-image-wrap">
+          <img id="q-image" src="" alt="صورة السؤال" />
+        </div>
+
+        <!-- Manual crop adjustment -->
+        <div id="crop-controls">
+          <span class="crop-label">ضبط القص:</span>
+          <div class="crop-input-wrap">
+            <label>أعلى</label>
+            <input type="number" id="cropTop" value="0" step="5" />
+          </div>
+          <div class="crop-input-wrap">
+            <label>أسفل</label>
+            <input type="number" id="cropBottom" value="0" step="5" />
+          </div>
+          <div class="crop-input-wrap">
+            <label>يسار</label>
+            <input type="number" id="cropLeft" value="0" step="5" />
+          </div>
+          <div class="crop-input-wrap">
+            <label>يمين</label>
+            <input type="number" id="cropRight" value="0" step="5" />
+          </div>
+          <button id="applyCropBtn" onclick="applyManualCrop()">تطبيق</button>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- RIGHT PANEL: Answer selection & stats -->
+    <aside id="right-panel">
+
+      <!-- Answer selection section -->
+      <div>
+        <div class="panel-section-title">الإجابة الصحيحة</div>
+        <div id="answer-options">
+          <label class="answer-option" id="opt-A">
+            <input type="radio" name="answer" value="A" onchange="selectAnswer('A')" />
+            <div class="answer-letter">A</div>
+            <span class="answer-option-text">خيار A</span>
+          </label>
+          <label class="answer-option" id="opt-B">
+            <input type="radio" name="answer" value="B" onchange="selectAnswer('B')" />
+            <div class="answer-letter">B</div>
+            <span class="answer-option-text">خيار B</span>
+          </label>
+          <label class="answer-option" id="opt-C">
+            <input type="radio" name="answer" value="C" onchange="selectAnswer('C')" />
+            <div class="answer-letter">C</div>
+            <span class="answer-option-text">خيار C</span>
+          </label>
+          <label class="answer-option" id="opt-D">
+            <input type="radio" name="answer" value="D" onchange="selectAnswer('D')" />
+            <div class="answer-letter">D</div>
+            <span class="answer-option-text">خيار D</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Stats section -->
+      <div id="stats-section">
+        <div class="panel-section-title">إحصائيات</div>
+        <div id="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-label">إجمالي الأسئلة</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-answered">0</div>
+            <div class="stat-label">أسئلة مجابة</div>
+          </div>
+        </div>
+        <div id="completion-bar-wrap">
+          <div id="completion-bar"></div>
+        </div>
+        <div id="completion-text">0% مكتمل</div>
+      </div>
+
+    </aside>
+
+  </div>
+
+  <!-- Hidden canvas for PDF rendering -->
+  <canvas id="pdf-canvas"></canvas>
+
+  <!-- Toast notification -->
+  <div id="toast"></div>
+
+  <!-- ========== JAVASCRIPT ========== -->
+  <script src="js/script.js"></script>
+</body>
+
+</html>
