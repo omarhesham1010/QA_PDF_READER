@@ -218,10 +218,64 @@ function renderQuestionList() {
       <span class="q-number">Q${q.id}</span>
       <span class="q-badge"></span>
       ${ocrIcon}
+      <button class="delete-q-btn" onclick="deleteQuestion(event, ${idx})" title="حذف السؤال">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          <line x1="10" y1="11" x2="10" y2="17"></line>
+          <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+      </button>
     `;
     item.addEventListener('click', () => selectQuestion(idx));
     list.appendChild(item);
   });
+}
+
+/**
+ * Delete a question from the list.
+ * @param {Event} event 
+ * @param {number} idx 
+ */
+function deleteQuestion(event, idx) {
+  event.stopPropagation(); // Prevent selectQuestion from firing
+
+  if (!confirm('هل أنت متأكد من حذف هذا السؤال؟')) return;
+
+  const deletedQ = appState.questions[idx];
+  appState.questions.splice(idx, 1);
+
+  // If no questions left, reset
+  if (appState.questions.length === 0) {
+    resetState();
+  } else {
+    // Always render list after modifying data
+    renderQuestionList();
+
+    if (appState.currentIndex === idx) {
+      // If we deleted the current question, select the nearest available
+      const nextIdx = Math.min(idx, appState.questions.length - 1);
+      selectQuestion(nextIdx);
+    } else {
+      // Adjust currentIndex if an item before it was deleted
+      if (appState.currentIndex > idx) {
+        appState.currentIndex--;
+      }
+      // Restore active highlight for the current question (since its index may have changed)
+      if (appState.currentIndex >= 0) {
+        const activeItem = document.getElementById(`q-item-${appState.currentIndex}`);
+        if (activeItem) activeItem.classList.add('active');
+      }
+    }
+  }
+
+  updateStats();
+  showToast(`تم حذف السؤال ${deletedQ.id}`, 'success');
+
+  // Disable export button if no questions left
+  if (appState.questions.length === 0) {
+    document.getElementById('exportBtn').disabled = true;
+  }
 }
 
 // ============================

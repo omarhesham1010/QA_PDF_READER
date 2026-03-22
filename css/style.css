@@ -261,6 +261,31 @@
       opacity: 1;
     }
 
+    /* Delete question button */
+    .delete-q-btn {
+      opacity: 0;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      transition: all var(--transition);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .q-item:hover .delete-q-btn {
+      opacity: 1;
+    }
+
+    .delete-q-btn:hover {
+      background: var(--danger);
+      color: #fff;
+      transform: scale(1.1);
+    }
+
     /* ========== CENTER PANEL ========== */
     #center {
       display: flex;
@@ -520,8 +545,6 @@
     }
 
     /* Stats section */
-    #stats-section {}
-
     #stats-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
