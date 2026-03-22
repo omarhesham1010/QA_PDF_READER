@@ -178,7 +178,22 @@ function detectQuestionRegions(textContent, canvasWidth, canvasHeight, viewport)
     }
   }
 
-  if (questionYPositions.length === 0) return [];
+  if (questionYPositions.length === 0) {
+    // FALLBACK for 1-question-per-page PDFs (like 121.pdf) that don't use 'السؤال'
+    // Uses substring matching because web PDF.js chunks options with other text sometimes (e.g. "60أ%25")
+    const pageText = textContent.items.map(it => it.str).join(' ');
+
+    const hasA = pageText.includes('\u0623');
+    const hasB = pageText.includes('\u0628');
+    const hasC = pageText.includes('\u062c');
+
+    const isAnswerKey = pageText.includes('الإجابات') && !pageText.includes('قارن');
+
+    if (hasA && hasB && hasC && !isAnswerKey) {
+      return [{ y1: 0, y2: canvasHeight, qIdx: 0 }];
+    }
+    return [];
+  }
 
   // Sort by Y (top to bottom)
   questionYPositions.sort((a, b) => a.y - b.y);
@@ -564,7 +579,7 @@ function resetState() {
  */
 function fixArabicPDFText(text) {
   if (!text) return text;
-  
+
   // إزالة أي رموز غير معرفة نتجت عن قراءة خاطئة للخط
   text = text.replace(/\uFFFD/g, '');
 
@@ -582,7 +597,7 @@ function fixArabicPDFText(text) {
   text = text.replace(/(^|\s)أك(?=\s|$)/g, '$1أكبر');
   text = text.replace(/أك$/g, 'أكبر');
   text = text.replace(/أك\s/g, 'أكبر ');
-  
+
   text = text.replace(/غ\s*كافية/g, 'غير كافية');
   text = text.replace(/^[يى]\s*المعطيات/g, 'المعطيات');
   text = text.replace(/^[يى]\s*غير\s*كافية/g, 'المعطيات غير كافية');
@@ -602,12 +617,12 @@ function fixArabicPDFText(text) {
 function evaluateExtractionQuality(text, rawText) {
   if (!text.trim()) return true; // Empty text means extraction failed entirely
   if (rawText && rawText.includes('\uFFFD')) return true; // Missing glyph mapping directly detected
-  
+
   // Check for excessive single Arabic letters (fragmentation: e.g. "ب ي ن" instead of "بين")
   // If a short text has 3 or more isolated single characters separated by spaces, it's mostly garbage.
   const singleLetters = text.match(/(^|\s)[\u0600-\u06FF](?=\s|$)/g);
   if (singleLetters && singleLetters.length >= 3 && text.length < 15) return true;
-  
+
   return false;
 }
 
@@ -669,7 +684,7 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   // Group labels into rows to define 2D bounding boxes (شبكة ديناميكية تمشي مع أي تصميم)
   const presentLabels = ARABIC_LETTERS.map(l => ({ letter: l, item: labelItems[l] })).filter(x => x.item);
   const rows = [];
-  
+
   presentLabels.sort((a, b) => a.item.y - b.item.y);
   for (const pl of presentLabels) {
     let placed = false;
@@ -710,17 +725,19 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   }
 
   const optionMap = {};
+  const metrics = {};
   let requiresOcr = false;
 
   for (const letter of ARABIC_LETTERS) {
     const bounds = boundaries[letter];
-    if (!bounds) { 
-      optionMap[letter] = ''; 
+    if (!bounds) {
+      optionMap[letter] = '';
       requiresOcr = true; // مساحة الخيار غير موجودة نهائياً أو مكسورة جداً
-      continue; 
+      metrics[letter] = { fragmentCount: 0, cleanLength: 0, failed: true };
+      continue;
     }
 
-    const regionItems = items.filter(c => 
+    const regionItems = items.filter(c =>
       c !== labelItems[letter] &&
       !ARABIC_LETTERS.includes(c.norm) &&
       c.y >= bounds.yMin && c.y < bounds.yMax &&
@@ -736,16 +753,28 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
       // Raw string Before cleanup
       const rawText = regionItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
       const cleanedText = fixArabicPDFText(rawText);
-      
+
       optionMap[letter] = cleanedText;
-      
+
       // تقييم الجودة لتحديد هل فشل الاستخراج لهذا الخيار
-      if (evaluateExtractionQuality(cleanedText, rawText)) {
-        requiresOcr = true;
-      }
+      const isFailed = evaluateExtractionQuality(cleanedText, rawText);
+      if (isFailed) requiresOcr = true;
+
+      // حساب المساحة التقريبية (Area) للتنسيق
+      const width = bounds.xMax !== Infinity && bounds.xMin !== -Infinity ? Math.max(0, bounds.xMax - bounds.xMin) : 0;
+      const height = bounds.yMax !== Infinity && bounds.yMin !== -Infinity ? Math.max(0, bounds.yMax - bounds.yMin) : 0;
+
+      metrics[letter] = {
+        fragmentCount: regionItems.length,
+        rawLength: rawText.length,
+        cleanLength: cleanedText.length,
+        boxArea: Math.round(width * height),
+        failed: isFailed
+      };
     } else {
       optionMap[letter] = '';
       requiresOcr = true; // نص فارغ تماماً لخيار تم العثور على حرفه
+      metrics[letter] = { fragmentCount: 0, cleanLength: 0, failed: true };
     }
   }
 
@@ -756,6 +785,7 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   return {
     firstOptionY,
     options: ARABIC_LETTERS.map(l => optionMap[l] || ''),
+    metrics,
     requiresOcr
   };
 }
@@ -801,6 +831,16 @@ async function processPdf(pdfDoc) {
     for (const region of regions) {
       // Detect where answer options start so we can crop them OUT of the image
       const optData = findOptionBoundary(textContent, region.y1, region.y2, viewport);
+
+      // السجلات التشخيصية (Diagnostic Logging) كما طلبت للتحليل
+      console.log(`\n=== تشخيص السؤال ${globalId} (صفحة ${pageNum}) ===`);
+      console.log(`Requires OCR Fallback? ${optData.requiresOcr ? 'YES ⚠️' : 'No ✅'}`);
+      if (optData.metrics) {
+        ['\u0623', '\u0628', '\u062c', '\u062f'].forEach((letter, i) => {
+          const m = optData.metrics[letter];
+          if (m) console.log(`   خيار [${['A', 'B', 'C', 'D'][i]}]: TextLength=${m.cleanLength}, Fragments=${m.fragmentCount}, Area=${m.boxArea || 'N/A'}, Failed Quality=${m.failed}`);
+        });
+      }
 
       // Image bottom = just above first option (or full region if no options found)
       const imageCropBottom = optData.firstOptionY !== null
