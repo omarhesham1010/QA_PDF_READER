@@ -4,21 +4,19 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-/** Scale at which to render each PDF page for screenshot quality */
-const RENDER_SCALE = 2.5;
+const RENDER_SCALE = 2.0;
 
 /** Padding (px on rendered canvas) to add above/below each question region */
-const DETECT_PADDING = 20;
+const DETECT_PADDING = 10;
 
 /** 
  * إعدادات قص الصورة الافتراضية (بالبكسل - على حجم الـ Canvas)
- * يمكنك تعديل هذه الأرقام لضبط القص من جميع الاتجاهات 
  */
 const GLOBAL_CROP = {
-  TOP: 0,      // موجب = بيقص من فوق أكتر (بينزل لتحت)
-  BOTTOM: 40, // سالب = بينزل لتحت أكتر قبل الخيارات (بيسيب مساحة)، موجب = بيقص أكتر 
-  LEFT: 80,     // موجب = بيقص من الشمال أكتر (بيدخل لجوه)
-  RIGHT: 220     // موجب = بيقص من اليمين أكتر (بيدخل لجوه)
+  TOP: 5,
+  BOTTOM: 15,
+  LEFT: 5,
+  RIGHT: 5
 };
 
 // ============================
@@ -78,73 +76,20 @@ document.getElementById('pdfInput').addEventListener('change', async (e) => {
  * detect question blocks, and capture screenshots.
  * @param {import('pdfjs-dist').PDFDocumentProxy} pdfDoc
  */
-async function processPdf(pdfDoc) {
-  const totalPages = pdfDoc.numPages;
-  const canvas = document.getElementById('pdf-canvas');
-  const ctx = canvas.getContext('2d');
 
-  /**
-   * Each entry: { pageImg: ImageData, pageCanvas: HTMLCanvasElement,
-   *               regions: [{y1, y2}] }
-   * We collect all pages first, then assign global question IDs.
-   */
-  let allQuestions = [];
-  let globalId = 1;
+// Global configuration for UI and visual debug
+window.appConfig = {
+  debugMode: false
+};
 
-  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-    const progress = Math.round(((pageNum - 1) / totalPages) * 80);
-    showProgress(`معالجة الصفحة ${pageNum} من ${totalPages}...`, progress);
-
-    const page = await pdfDoc.getPage(pageNum);
-
-    // Render the page to the hidden canvas at high scale
-    const viewport = page.getViewport({ scale: RENDER_SCALE });
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: ctx, viewport }).promise;
-
-    // Extract text with positions to find "السؤال" occurrences
-    const textContent = await page.getTextContent();
-    const regions = detectQuestionRegions(textContent, canvas.width, canvas.height, viewport);
-
-    // For each region, crop from canvas and save as data URL
-    for (const region of regions) {
-      const imageDataUrl = cropCanvasRegion(
-        canvas, region.x1, region.y1, region.x2 - region.x1, region.y2 - region.y1
-      );
-      allQuestions.push({
-        id: globalId++,
-        imageDataUrl,
-        // Raw crop coords (for manual adjustment)
-        _raw: { canvas: { width: canvas.width, height: canvas.height }, region },
-        // Adjustment offsets in px (on the rendered canvas)
-        cropAdjust: { top: 0, bottom: 0, left: 0, right: 0 },
-        options: ['A', 'B', 'C', 'D'],
-        correct: null,
-      });
-    }
+function toggleDebugMode() {
+  const checkbox = document.getElementById('debugModeCheckbox');
+  if (checkbox) window.appConfig.debugMode = checkbox.checked;
+  if (appState.currentIndex >= 0) {
+    selectQuestion(appState.currentIndex);
   }
-
-  showProgress('جاري بناء الواجهة...', 90);
-
-  // Store in state
-  appState.questions = allQuestions;
-
-  if (allQuestions.length === 0) {
-    showToast('لم يتم اكتشاف أي أسئلة. تأكد أن الملف يحتوي على "السؤال"', 'error');
-    hideProgress();
-    return;
-  }
-
-  renderQuestionList();
-  updateStats();
-  document.getElementById('exportBtn').disabled = false;
-  hideProgress();
-  showToast(`✓ تم اكتشاف ${allQuestions.length} سؤال بنجاح`, 'success');
-
-  // Auto-select first question
-  selectQuestion(0);
 }
+
 
 /**
  * Detect question regions on a rendered page.
@@ -168,7 +113,8 @@ function detectQuestionRegions(textContent, canvasWidth, canvasHeight, viewport)
     if (!item.str) continue;
     // Normalize: remove kashida + collapse repeated whitespace
     const normalized = item.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
-    if (normalized.includes('السؤال')) {
+    // Support both Arabic 'السؤال' and Latin 'Question'
+    if (normalized.includes('السؤال') || normalized.toLowerCase().startsWith('question') || normalized.toLowerCase().startsWith('q:')) {
       // Transform PDF coordinates to canvas pixel coordinates
       // item.transform = [scaleX, skewX, skewY, scaleY, x, y]
       const [, , , , pdfX, pdfY] = item.transform;
@@ -179,18 +125,27 @@ function detectQuestionRegions(textContent, canvasWidth, canvasHeight, viewport)
   }
 
   if (questionYPositions.length === 0) {
-    // FALLBACK for 1-question-per-page PDFs (like 121.pdf) that don't use 'السؤال'
-    // Uses substring matching because web PDF.js chunks options with other text sometimes (e.g. "60أ%25")
+    // FALLBACK for PDFs that don't use 'السؤال'
+    // Support both Arabic (أ ب ج د) and Latin (A B C D) option labels
     const pageText = textContent.items.map(it => it.str).join(' ');
 
-    const hasA = pageText.includes('\u0623');
-    const hasB = pageText.includes('\u0628');
-    const hasC = pageText.includes('\u062c');
+    const arabicRegex = /(?<![\u0621-\u064A])([\u0623\u0628\u062c\u062f])(?![\u0621-\u064A])/g;
+    const arabicMatches = pageText.match(arabicRegex);
+    const uniqueArabic = new Set(arabicMatches || []);
+
+    const latinRegex = /(?<![A-Za-z])([ABCD])(?![A-Za-z])/g;
+    const latinMatches = pageText.match(latinRegex);
+    const uniqueLatin = new Set(latinMatches || []);
 
     const isAnswerKey = pageText.includes('الإجابات') && !pageText.includes('قارن');
+    const isCoverPage = textContent.items.length < 20;
 
-    if (hasA && hasB && hasC && !isAnswerKey) {
-      return [{ y1: 0, y2: canvasHeight, qIdx: 0 }];
+    const hasArabicOptions = uniqueArabic.size >= 3;
+    const hasLatinOptions = uniqueLatin.size >= 3;
+
+    if ((hasArabicOptions || hasLatinOptions) && !isAnswerKey && !isCoverPage) {
+      // Fix: Added x1, x2 to ensure image captures full width
+      return [{ x1: 0, y1: 0, x2: canvasWidth, y2: canvasHeight, qIdx: 0 }];
     }
     return [];
   }
@@ -277,7 +232,7 @@ function renderQuestionList() {
  * Select and display a question by its list index.
  * @param {number} idx
  */
-function selectQuestion(idx) {
+async function selectQuestion(idx) {
   const q = appState.questions[idx];
   if (!q) return;
 
@@ -296,9 +251,15 @@ function selectQuestion(idx) {
   const viewer = document.getElementById('question-viewer');
   viewer.classList.add('visible');
 
-  // Update image
+  // If debug mode is ON, we re-render and draw boxes; otherwise use the cached image
+  if (window.appConfig.debugMode && q.debugBoxes) {
+    const dataUrl = await renderWithDebugBoxes(q);
+    document.getElementById('q-image').src = dataUrl;
+  } else {
+    document.getElementById('q-image').src = q.imageDataUrl;
+  }
+
   document.getElementById('q-title').textContent = `السؤال ${q.id}`;
-  document.getElementById('q-image').src = q.imageDataUrl;
 
   // Reset crop inputs to this question's adjustments
   document.getElementById('cropTop').value = q.cropAdjust.top;
@@ -320,6 +281,40 @@ function selectQuestion(idx) {
     textEl.textContent = extracted || `خيار ${letter}`;
   });
 }
+
+/**
+ * Renders the question image WITH debug bounding boxes overlay.
+ */
+async function renderWithDebugBoxes(q) {
+  const canvas = document.getElementById('pdf-canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  
+  // Re-render the base image first
+  await rerenderQuestionImage(q);
+  
+  // Now draw the boxes on top of the CROP (need to offset by crop coords)
+  const { region } = q._raw;
+  const adj = q.cropAdjust;
+  const offsetX = region.x1 + adj.left;
+  const offsetY = region.y1 + adj.top;
+
+  // Draw boxes
+  if (q.debugBoxes) {
+    q.debugBoxes.forEach(box => {
+      const b = box.bounds;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#ef4444'; // Red for the box
+      ctx.strokeRect(b.xMin - offsetX, b.yMin - offsetY, (b.xMax - b.xMin), (b.yMax - b.yMin));
+      
+      ctx.fillStyle = '#ef4444';
+      ctx.font = 'bold 16px Inter, sans-serif';
+      ctx.fillText(box.letter, b.xMin - offsetX + 5, b.yMin - offsetY + 20);
+    });
+  }
+
+  return canvas.toDataURL('image/png');
+}
+
 
 // ============================
 // ANSWER SELECTION
@@ -404,8 +399,7 @@ async function rerenderQuestionImage(q) {
 
   const page = await appState.pdfDoc.getPage(pageNum);
 
-  const scale = window.devicePixelRatio * 2 || 4;
-  const viewport = page.getViewport({ scale });
+  const viewport = page.getViewport({ scale: RENDER_SCALE });
   canvas.width = viewport.width;
   canvas.height = viewport.height;
 
@@ -477,6 +471,10 @@ async function exportZip() {
         image: `questions/${filename}`,
         options: finalOptions,
         correct: finalCorrect,
+        requiresOCR: q.requiresOcr,
+        confidence: q.confidence || 0,
+        fragments: q.totalFragments || 0,
+        optionsMetrics: q.metrics || {}
       });
     }
 
@@ -578,7 +576,8 @@ function resetState() {
  * @returns {string}
  */
 function fixArabicPDFText(text) {
-  if (!text) return text;
+  if (!text) return { text: '', heuristicsApplied: false };
+  const original = text;
 
   // إزالة أي رموز غير معرفة نتجت عن قراءة خاطئة للخط
   text = text.replace(/\uFFFD/g, '');
@@ -603,8 +602,11 @@ function fixArabicPDFText(text) {
   text = text.replace(/^[يى]\s*غير\s*كافية/g, 'المعطيات غير كافية');
   if (text.trim() === 'ي' || text.trim() === 'ى' || text.trim() === 'غ') text = 'المعطيات غير كافية';
 
-  // تنظيف أي مسافات زائدة
-  return text.trim();
+  const cleaned = text.trim();
+  return {
+    text: cleaned,
+    heuristicsApplied: original !== cleaned && cleaned.length > 0
+  };
 }
 
 /**
@@ -614,16 +616,18 @@ function fixArabicPDFText(text) {
  * @param {string} rawText - The raw text before cleanup
  * @returns {boolean} true if text appears corrupted
  */
-function evaluateExtractionQuality(text, rawText) {
-  if (!text.trim()) return true; // Empty text means extraction failed entirely
-  if (rawText && rawText.includes('\uFFFD')) return true; // Missing glyph mapping directly detected
+function evaluateExtractionQuality(text, rawText, heuristicsApplied = false) {
+  if (!text.trim()) return { failed: true, reason: 'empty' };
+  if (rawText && rawText.includes('\uFFFD') && !heuristicsApplied)
+    return { failed: true, reason: 'corrupted_encoding' };
 
-  // Check for excessive single Arabic letters (fragmentation: e.g. "ب ي ن" instead of "بين")
-  // If a short text has 3 or more isolated single characters separated by spaces, it's mostly garbage.
-  const singleLetters = text.match(/(^|\s)[\u0600-\u06FF](?=\s|$)/g);
-  if (singleLetters && singleLetters.length >= 3 && text.length < 15) return true;
+  // Check for excessive single letters (fragmentation: e.g. "ب ي ن" or "b e t w e e n")
+  const regex = heuristicsApplied ? /(^|\s)[\u0600-\u06FF](?=\s|$)/g : /(^|\s)[a-zA-Z\u0600-\u06FF](?=\s|$)/g;
+  const singleLetters = text.match(regex);
+  if (singleLetters && singleLetters.length >= 3 && text.length < 15)
+    return { failed: true, reason: 'fragmented' };
 
-  return false;
+  return { failed: false, reason: null };
 }
 
 // ============================
@@ -632,29 +636,21 @@ function evaluateExtractionQuality(text, rawText) {
 
 /**
  * Arabic MCQ option markers: أ ب ج د (equivalent to A B C D).
- * Searches text items in a question's Y range for these markers,
- * returning the first option Y (for image cropping) and extracted text.
+ * Uses cluster-based detection to find the true options row,
+ * avoiding watermarks/headers that also contain Arabic letters.
  *
  * @param {TextContent} textContent - pdf.js page text content
  * @param {number} qY1 - question region top (canvas px)
  * @param {number} qY2 - question region bottom (canvas px)
  * @param {PageViewport} viewport
- * @returns {{ firstOptionY: number|null, options: string[] }}
+ * @returns {{ firstOptionY: number|null, options: string[], requiresOcr: boolean, metrics: object }}
  */
 function findOptionBoundary(textContent, qY1, qY2, viewport) {
-  /**
-   * Detects Arabic MCQ options in a question region.
-   *
-   * In this PDF, each option consists of TWO separate text items at ~same Y:
-   *   1. A single Arabic letter: أ / ب / ج / د  (the label, at a higher X = more right in RTL)
-   *   2. The option value text (at a lower X = to the left of the label)
-   *
-   * We find each label item, then find its paired value as the item at
-   * approximately the same Y with the closest X to the left of the label.
-   */
   const ARABIC_LETTERS = ['\u0623', '\u0628', '\u062c', '\u062f'];
+  const LATIN_LETTERS  = ['A', 'B', 'C', 'D'];
+  const ALL_OPTION_LETTERS = [...ARABIC_LETTERS, ...LATIN_LETTERS];
 
-  // Collect items in question region
+  // Collect all text items in the question region
   const items = [];
   for (const item of textContent.items) {
     if (!item.str) continue;
@@ -666,25 +662,75 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     }
   }
 
-  if (items.length === 0) return { firstOptionY: null, options: ['', '', '', ''], requiresOcr: true };
-  items.sort((a, b) => a.y - b.y);
+  if (items.length === 0) return { firstOptionY: null, options: ['', '', '', ''], requiresOcr: true, metrics: {}, confidence: 0 };
 
-  // Find each Arabic letter item
+  // Auto-detect: Latin A/B/C/D vs Arabic أ/ب/ج/د
+  const latinCount  = items.filter(it => LATIN_LETTERS.includes(it.norm)).length;
+  const arabicCount = items.filter(it => ARABIC_LETTERS.includes(it.norm)).length;
+  const useLatin    = latinCount > arabicCount;
+  const OPTION_LETTERS = useLatin ? LATIN_LETTERS : ARABIC_LETTERS;
+
+  const optionRegex = useLatin
+    ? /(?<![A-Za-z])([ABCD])(?![A-Za-z])/
+    : /(?<![\u0621-\u064A])([\u0623\u0628\u062c\u062f])(?![\u0621-\u064A])/;
+
+  const allCandidates = [];
+  for (const it of items) {
+    if (OPTION_LETTERS.includes(it.norm)) {
+      allCandidates.push({ letter: it.norm, item: it, y: it.y, x: it.x });
+      continue;
+    }
+    const match = it.norm.match(optionRegex);
+    if (match) {
+      allCandidates.push({ letter: match[1], item: it, y: it.y, x: it.x });
+    }
+  }
+
+  // Megaclusters logic for robust row detection
+  const megaclusters = [];
+  for (const c of allCandidates) {
+    let merged = false;
+    for (const mega of megaclusters) {
+      if (Math.abs(mega.y - c.y) <= 15) {
+        mega.candidates.push(c);
+        mega.uniqueLetters.add(c.letter);
+        mega.y = (mega.y * (mega.candidates.length - 1) + c.y) / mega.candidates.length;
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) {
+      megaclusters.push({ y: c.y, candidates: [c], uniqueLetters: new Set([c.letter]) });
+    }
+  }
+
+  megaclusters.sort((a, b) => b.uniqueLetters.size - a.uniqueLetters.size || b.y - a.y);
+  const bestCluster = megaclusters[0];
+
   const labelItems = {};
-  for (const item of items) {
-    if (ARABIC_LETTERS.includes(item.norm) && !labelItems[item.norm]) {
-      labelItems[item.norm] = item;
+  if (bestCluster) {
+    for (const letter of OPTION_LETTERS) {
+      const cands = bestCluster.candidates.filter(c => c.letter === letter).sort((a, b) => a.x - b.x);
+      if (cands.length > 0) {
+        labelItems[letter] = cands[cands.length - 1].item;
+      }
     }
   }
 
   if (Object.keys(labelItems).length === 0) {
-    return { firstOptionY: null, options: ['', '', '', ''], requiresOcr: true };
+    for (const item of items) {
+      if (OPTION_LETTERS.includes(item.norm) && !labelItems[item.norm]) {
+        labelItems[item.norm] = item;
+      }
+    }
   }
 
-  // Group labels into rows to define 2D bounding boxes (شبكة ديناميكية تمشي مع أي تصميم)
-  const presentLabels = ARABIC_LETTERS.map(l => ({ letter: l, item: labelItems[l] })).filter(x => x.item);
-  const rows = [];
+  if (Object.keys(labelItems).length === 0) {
+    return { firstOptionY: null, options: ['', '', '', ''], requiresOcr: true, metrics: {}, confidence: 0, lettersDetected: false };
+  }
 
+  const presentLabels = OPTION_LETTERS.map(l => ({ letter: l, item: labelItems[l] })).filter(x => x.item);
+  const rows = [];
   presentLabels.sort((a, b) => a.item.y - b.item.y);
   for (const pl of presentLabels) {
     let placed = false;
@@ -696,16 +742,20 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
         break;
       }
     }
-    if (!placed) {
-      rows.push({ y: pl.item.y, labels: [pl] });
-    }
+    if (!placed) rows.push({ y: pl.item.y, labels: [pl] });
   }
 
-  // Sort rows top-to-bottom, and labels inside right-to-left
   rows.sort((a, b) => a.y - b.y);
-  rows.forEach(row => row.labels.sort((a, b) => b.item.x - a.item.x));
+  
+  // RTL sorting for Arabic, LTR sorting for Latin
+  rows.forEach(row => {
+    if (useLatin) {
+      row.labels.sort((a, b) => a.item.x - b.item.x); // LTR
+    } else {
+      row.labels.sort((a, b) => b.item.x - a.item.x); // RTL
+    }
+  });
 
-  // Define strict 2D boundaries for each option's territory
   const boundaries = {};
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r];
@@ -713,10 +763,8 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     for (let i = 0; i < row.labels.length; i++) {
       const pl = row.labels[i];
       const nextPl = row.labels[i + 1];
-
       boundaries[pl.letter] = {
         yMin: row.y - 20,
-        // قفل الحد السفلي على 40 بكسل كحد أقصى لمنع التقاط نصوص الـ Footer أو الـ Watermarks
         yMax: nextRow ? nextRow.y - 10 : row.y + 40,
         xMax: pl.item.x + 30,
         xMin: nextPl ? nextPl.item.x + 20 : -Infinity
@@ -726,67 +774,81 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
 
   const optionMap = {};
   const metrics = {};
-  let requiresOcr = false;
+  let totalFragments = 0;
+  let anyOptionCorruptedOrFragmented = false;
+  const debugBoxes = [];
 
-  for (const letter of ARABIC_LETTERS) {
+  for (const letter of OPTION_LETTERS) {
     const bounds = boundaries[letter];
     if (!bounds) {
       optionMap[letter] = '';
-      requiresOcr = true; // مساحة الخيار غير موجودة نهائياً أو مكسورة جداً
-      metrics[letter] = { fragmentCount: 0, cleanLength: 0, failed: true };
+      metrics[letter] = { fragmentCount: 0, failed: true, reason: 'empty_region' };
       continue;
     }
 
+    debugBoxes.push({ letter, bounds });
+
     const regionItems = items.filter(c =>
       c !== labelItems[letter] &&
-      !ARABIC_LETTERS.includes(c.norm) &&
+      !OPTION_LETTERS.includes(c.norm) &&
       c.y >= bounds.yMin && c.y < bounds.yMax &&
       c.x <= bounds.xMax && c.x > bounds.xMin
     );
 
     if (regionItems.length > 0) {
-      // Sort multi-line options: top-to-bottom, then right-to-left
-      regionItems.sort((a, b) => {
+      // Deduplicate overlapping items (bold rendering artifact)
+      const uniqueItems = [];
+      for (const it of regionItems) {
+        const isDupe = uniqueItems.some(u =>
+          u.norm === it.norm && Math.abs(u.x - it.x) < 5 && Math.abs(u.y - it.y) < 5
+        );
+        if (!isDupe) uniqueItems.push(it);
+      }
+      uniqueItems.sort((a, b) => {
         if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
         return b.x - a.x;
       });
-      // Raw string Before cleanup
-      const rawText = regionItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
-      const cleanedText = fixArabicPDFText(rawText);
-
+      const rawText = uniqueItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
+      const { text: cleanedText, heuristicsApplied } = fixArabicPDFText(rawText);
       optionMap[letter] = cleanedText;
-
-      // تقييم الجودة لتحديد هل فشل الاستخراج لهذا الخيار
-      const isFailed = evaluateExtractionQuality(cleanedText, rawText);
-      if (isFailed) requiresOcr = true;
-
-      // حساب المساحة التقريبية (Area) للتنسيق
-      const width = bounds.xMax !== Infinity && bounds.xMin !== -Infinity ? Math.max(0, bounds.xMax - bounds.xMin) : 0;
-      const height = bounds.yMax !== Infinity && bounds.yMin !== -Infinity ? Math.max(0, bounds.yMax - bounds.yMin) : 0;
-
+      const evalQuality = evaluateExtractionQuality(cleanedText, rawText, heuristicsApplied);
+      if (evalQuality.failed) anyOptionCorruptedOrFragmented = true;
+      totalFragments += uniqueItems.length;
       metrics[letter] = {
-        fragmentCount: regionItems.length,
-        rawLength: rawText.length,
-        cleanLength: cleanedText.length,
-        boxArea: Math.round(width * height),
-        failed: isFailed
+        fragmentCount: uniqueItems.length,
+        text: cleanedText,
+        failed: evalQuality.failed,
+        reason: evalQuality.reason,
+        heuristicsApplied
       };
     } else {
       optionMap[letter] = '';
-      requiresOcr = true; // نص فارغ تماماً لخيار تم العثور على حرفه
-      metrics[letter] = { fragmentCount: 0, cleanLength: 0, failed: true };
+      metrics[letter] = { fragmentCount: 0, text: '', failed: true, reason: 'empty_region' };
     }
   }
 
-  // firstOptionY = Y of first label found
+  let optionsDetected = 0;
+  for (const letter of OPTION_LETTERS) {
+    if (optionMap[letter] && !metrics[letter].failed) optionsDetected++;
+  }
+  let penalty = 0;
+  if (anyOptionCorruptedOrFragmented) penalty += 0.2;
+  if (totalFragments > 20) penalty += 0.1;
+  let confidence = (optionsDetected / 4) - penalty;
+  confidence = Math.max(0, Math.min(1, confidence));
+  const requiresOcr = confidence < 0.5;
+
   const labelYs = presentLabels.map(pl => pl.item.y);
   const firstOptionY = labelYs.length > 0 ? Math.min(...labelYs) : null;
 
   return {
     firstOptionY,
-    options: ARABIC_LETTERS.map(l => optionMap[l] || ''),
+    options: OPTION_LETTERS.map(l => optionMap[l] || ''),
     metrics,
-    requiresOcr
+    requiresOcr,
+    confidence,
+    debugBoxes,
+    totalFragments
   };
 }
 
@@ -807,17 +869,13 @@ async function processPdf(pdfDoc) {
 
     const page = await pdfDoc.getPage(pageNum);
 
-    const scale = window.devicePixelRatio * 2 || 4;
-    const viewport = page.getViewport({ scale });
+    const viewport = page.getViewport({ scale: RENDER_SCALE });
 
     canvas.width = viewport.width;
     canvas.height = viewport.height;
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-
-    console.log("Canvas resolution:", canvas.width, canvas.height);
-    console.log("Viewport scale:", scale);
 
     await page.render({
       canvasContext: ctx,
@@ -832,13 +890,14 @@ async function processPdf(pdfDoc) {
       // Detect where answer options start so we can crop them OUT of the image
       const optData = findOptionBoundary(textContent, region.y1, region.y2, viewport);
 
-      // السجلات التشخيصية (Diagnostic Logging) كما طلبت للتحليل
+      // SRecords Diagnostic Logging (supports Latin and Arabic labels)
       console.log(`\n=== تشخيص السؤال ${globalId} (صفحة ${pageNum}) ===`);
+      console.log(`Confidence Score: ${Math.round((optData.confidence || 0) * 100)}%`);
       console.log(`Requires OCR Fallback? ${optData.requiresOcr ? 'YES ⚠️' : 'No ✅'}`);
       if (optData.metrics) {
-        ['\u0623', '\u0628', '\u062c', '\u062f'].forEach((letter, i) => {
+        Object.keys(optData.metrics).forEach(letter => {
           const m = optData.metrics[letter];
-          if (m) console.log(`   خيار [${['A', 'B', 'C', 'D'][i]}]: TextLength=${m.cleanLength}, Fragments=${m.fragmentCount}, Area=${m.boxArea || 'N/A'}, Failed Quality=${m.failed}`);
+          if (m) console.log(`   خيار [${letter}]: CleanTextLength=${(m.text || '').length}, Fragments=${m.fragmentCount}, Failed Quality=${m.failed}`);
         });
       }
 
@@ -858,12 +917,16 @@ async function processPdf(pdfDoc) {
       allQuestions.push({
         id: globalId++,
         imageDataUrl,
-        optionTexts: optData.options, // extracted Arabic option text ['', '', '', '']
-        requiresOcr: optData.requiresOcr, // Flag if the extracted text failed the quality check
+        optionTexts: optData.options,
+        requiresOcr: optData.requiresOcr,
+        confidence: optData.confidence,
+        debugBoxes: optData.debugBoxes,
+        totalFragments: optData.totalFragments,
+        metrics: optData.metrics,
         _raw: {
-          pageNum,                 // store page number for re-rendering
+          pageNum,
           region,
-          imageCropBottom,  // used by manual crop adjustment
+          imageCropBottom,
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
         },

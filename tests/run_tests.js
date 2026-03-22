@@ -1,65 +1,75 @@
 const fs = require('fs');
+const path = require('path');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
 const DETECT_PADDING = 20;
 
-function detectQuestionRegions(textContent, canvasHeight, viewport) {
+function detectQuestionRegions(textContent, canvasWidth, canvasHeight, viewport) {
   const questionYPositions = [];
   for (const item of textContent.items) {
     if (!item.str) continue;
     const normalized = item.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
-    if (normalized.includes('السؤال')) {
+    if (normalized.includes('السؤال') || normalized.toLowerCase().startsWith('question') || normalized.toLowerCase().startsWith('q:')) {
       const [, , , , pdfX, pdfY] = item.transform;
       const [canvasX, canvasY] = viewport.convertToViewportPoint(pdfX, pdfY);
       questionYPositions.push({ y: canvasY, x: canvasX });
     }
   }
+
   if (questionYPositions.length === 0) {
-    const ARABIC_LETTERS = ['\u0623', '\u0628', '\u062c', '\u062d', '\u062f', '\u0647', '\u0648']; // Added more Arabic letters for robustness
-    const hasOptions = textContent.items.some(it => ARABIC_LETTERS.includes(it.str.trim()));
-    if (hasOptions) {
-      return [{ y1: 0, y2: canvasHeight, qIdx: 0 }];
+    const pageText = textContent.items.map(it => it.str).join(' ');
+    const arabicRegex = /(?<![\u0621-\u064A])([\u0623\u0628\u062c\u062f])(?![\u0621-\u064A])/g;
+    const arabicMatches = pageText.match(arabicRegex);
+    const uniqueArabic = new Set(arabicMatches || []);
+
+    const latinRegex = /(?<![A-Za-z])([ABCD])(?![A-Za-z])/g;
+    const latinMatches = pageText.match(latinRegex);
+    const uniqueLatin = new Set(latinMatches || []);
+
+    const hasArabicOptions = uniqueArabic.size >= 3;
+    const hasLatinOptions = uniqueLatin.size >= 3;
+    const isAnswerKey = pageText.includes('الإجابات') && !pageText.includes('قارن');
+
+    if ((hasArabicOptions || hasLatinOptions) && !isAnswerKey) {
+      return [{ x1: 0, y1: 0, x2: canvasWidth, y2: canvasHeight, qIdx: 0 }];
     }
     return [];
   }
-  questionYPositions.sort((a, b) => a.y - b.y);
 
+  questionYPositions.sort((a, b) => a.y - b.y);
   const regions = [];
   for (let i = 0; i < questionYPositions.length; i++) {
     const y1 = Math.max(0, questionYPositions[i].y - DETECT_PADDING);
     const y2 = i + 1 < questionYPositions.length
       ? Math.min(canvasHeight, questionYPositions[i + 1].y - DETECT_PADDING)
       : canvasHeight;
-    regions.push({ y1, y2 });
+    regions.push({ x1: 0, y1, x2: canvasWidth, y2 });
   }
   return regions;
 }
 
 function fixArabicPDFText(text) {
-  if (!text) return text;
+  if (!text) return { text: '', heuristicsApplied: false };
+  const original = text;
   text = text.replace(/\uFFFD/g, '');
   text = text.replace(/األ/g, 'الأ').replace(/اإل/g, 'الإ').replace(/اآل/g, 'الآ')
     .replace(/اال/g, 'الا').replace(/ىل/g, 'لى').replace(/ىع/g, 'عى').replace(/ىف/g, 'فى');
-  text = text.replace(/(^|\s)أك(?=\s|$)/g, '$1أكبر');
-  text = text.replace(/أك$/g, 'أكبر');
-  text = text.replace(/أك\s/g, 'أكبر ');
-  text = text.replace(/غ\s*كافية/g, 'غير كافية');
-  text = text.replace(/^[يى]\s*المعطيات/g, 'المعطيات');
-  text = text.replace(/^[يى]\s*غير\s*كافية/g, 'المعطيات غير كافية');
-  if (text.trim() === 'ي' || text.trim() === 'ى' || text.trim() === 'غ') text = 'المعطيات غير كافية';
-  return text.trim();
+  const cleaned = text.trim();
+  return { text: cleaned, heuristicsApplied: original !== cleaned && cleaned.length > 0 };
 }
 
-function evaluateExtractionQuality(text, rawText) {
-  if (!text.trim()) return true;
-  if (rawText && rawText.includes('\uFFFD')) return true;
-  const singleLetters = text.match(/(^|\s)[\u0600-\u06FF](?=\s|$)/g);
-  if (singleLetters && singleLetters.length >= 3 && text.length < 15) return true;
-  return false;
+function evaluateExtractionQuality(text, rawText, heuristicsApplied = false) {
+  if (!text.trim()) return { failed: true };
+  const regex = heuristicsApplied ? /(^|\s)[\u0600-\u06FF](?=\s|$)/g : /(^|\s)[a-zA-Z\u0600-\u06FF](?=\s|$)/g;
+  const singleLetters = text.match(regex);
+  if (singleLetters && singleLetters.length >= 3 && text.length < 15) return { failed: true };
+  return { failed: false };
 }
 
 function findOptionBoundary(textContent, qY1, qY2, viewport) {
   const ARABIC_LETTERS = ['\u0623', '\u0628', '\u062c', '\u062f'];
+  const LATIN_LETTERS  = ['A', 'B', 'C', 'D'];
+  
   const items = [];
   for (const item of textContent.items) {
     if (!item.str) continue;
@@ -71,15 +81,22 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     }
   }
 
-  // Group candidates for each letter by Y coordinate (tolerance 60px) to find the TRUE options row, avoiding watermarks
-  // We use a regex that matches أ, ب, ج, د only if they are not preceded or followed by another Arabic letter
-  // This matches "أ)" or "60أ" or " أ ", but perfectly ignores "أحمد"
-  const optionRegex = /(?<![\u0621-\u064A])([أبجد])(?![\u0621-\u064A])/;
+  if (items.length === 0) return { options: ['', '', '', ''], requiresOcr: true, confidence: 0 };
+
+  const latinCount  = items.filter(it => LATIN_LETTERS.includes(it.norm)).length;
+  const arabicCount = items.filter(it => ARABIC_LETTERS.includes(it.norm)).length;
+  const useLatin    = latinCount > arabicCount;
+  const OPTION_LETTERS = useLatin ? LATIN_LETTERS : ARABIC_LETTERS;
+
+  const optionRegex = useLatin ? /(?<![A-Za-z])([ABCD])(?![A-Za-z])/ : /(?<![\u0621-\u064A])([أبجد])(?![\u0621-\u064A])/;
+  
   const allCandidates = [];
   for (const it of items) {
     const match = it.norm.match(optionRegex);
     if (match) {
-      allCandidates.push({ letter: match[1], item: it, y: it.y, x: it.x, norm: match[1] });
+      allCandidates.push({ letter: match[1], item: it, y: it.y, x: it.x });
+    } else if (OPTION_LETTERS.includes(it.norm)) {
+      allCandidates.push({ letter: it.norm, item: it, y: it.y, x: it.x });
     }
   }
 
@@ -90,66 +107,26 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
       if (Math.abs(cluster.y - cand.y) <= 30) {
         cluster.candidates.push(cand);
         cluster.uniqueLetters.add(cand.letter);
-        cluster.y = (cluster.y * (cluster.candidates.length - 1) + cand.y) / cluster.candidates.length;
-        placed = true;
-        break;
+        placed = true; break;
       }
     }
-    if (!placed) {
-      clusters.push({ y: cand.y, candidates: [cand], uniqueLetters: new Set([cand.letter]) });
-    }
+    if (!placed) clusters.push({ y: cand.y, candidates: [cand], uniqueLetters: new Set([cand.letter]) });
   }
 
-  // Merge clusters that belong to the same 2x2 grid (Y distance <= 300, no intersecting letters)
-  const megaclusters = [];
-  for (const c of clusters) {
-    let merged = false;
-    for (const mega of megaclusters) {
-      if (Math.abs(mega.y - c.y) <= 300) {
-        let overlap = false;
-        for (const letter of c.uniqueLetters) {
-          if (mega.uniqueLetters.has(letter)) { overlap = true; break; }
-        }
-        if (!overlap) {
-          mega.candidates.push(...c.candidates);
-          for (const l of c.uniqueLetters) mega.uniqueLetters.add(l);
-          mega.y = (mega.y * mega.candidates.length + c.y * c.candidates.length) / (mega.candidates.length + c.candidates.length);
-          merged = true;
-          break;
-        }
-      }
-    }
-    if (!merged) {
-      megaclusters.push({ y: c.y, candidates: [...c.candidates], uniqueLetters: new Set(c.uniqueLetters) });
-    }
-  }
-
-  // The true options row is the cluster containing the most unique Arabic option letters
-  // Tie wrapper: prefer the cluster that is lower on the page (larger Y)
-  megaclusters.sort((a, b) => b.uniqueLetters.size - a.uniqueLetters.size || b.y - a.y);
-  
-  if (items.some(i => i.norm === '7')) {
-    console.log("PAGE 8 CLUSTERS:", JSON.stringify(clusters, (k,v) => (k==='uniqueLetters' ? [...v] : v), 2));
-  }
-  
-  const bestCluster = megaclusters[0];
+  clusters.sort((a, b) => b.uniqueLetters.size - a.uniqueLetters.size || b.y - a.y);
+  const bestCluster = clusters[0];
 
   const labelItems = {};
   if (bestCluster) {
-    const ARABIC_LETTERS = ['أ', 'ب', 'ج', 'د'];
-    for (const letter of ARABIC_LETTERS) {
+    for (const letter of OPTION_LETTERS) {
       const cands = bestCluster.candidates.filter(c => c.letter === letter).sort((a, b) => a.x - b.x);
-      if (cands.length > 0) {
-        labelItems[letter] = cands[cands.length - 1].item; // أقصى اليمين
-      }
+      if (cands.length > 0) labelItems[letter] = cands[cands.length - 1].item;
     }
   }
 
-  if (Object.keys(labelItems).length === 0) {
-    return { options: ['', '', '', ''], requiresOcr: true };
-  }
+  if (Object.keys(labelItems).length === 0) return { options: ['', '', '', ''], requiresOcr: true, confidence: 0 };
 
-  const presentLabels = ARABIC_LETTERS.map(l => ({ letter: l, item: labelItems[l] })).filter(x => x.item);
+  const presentLabels = OPTION_LETTERS.map(l => ({ letter: l, item: labelItems[l] })).filter(x => x.item);
   const rows = [];
   presentLabels.sort((a, b) => a.item.y - b.item.y);
   for (const pl of presentLabels) {
@@ -157,16 +134,16 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     for (const row of rows) {
       if (Math.abs(row.y - pl.item.y) <= 15) {
         row.labels.push(pl);
-        row.y = (row.y * (row.labels.length - 1) + pl.item.y) / row.labels.length;
-        placed = true;
-        break;
+        placed = true; break;
       }
     }
     if (!placed) rows.push({ y: pl.item.y, labels: [pl] });
   }
 
-  rows.sort((a, b) => a.y - b.y);
-  rows.forEach(row => row.labels.sort((a, b) => b.item.x - a.item.x));
+  rows.forEach(row => {
+    if (useLatin) row.labels.sort((a, b) => a.item.x - b.item.x);
+    else row.labels.sort((a, b) => b.item.x - a.item.x);
+  });
 
   const boundaries = {};
   for (let r = 0; r < rows.length; r++) {
@@ -185,80 +162,73 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   }
 
   const optionMap = {};
-  let requiresOcr = false;
-
-  for (const letter of ARABIC_LETTERS) {
+  let detectedCount = 0;
+  for (const letter of OPTION_LETTERS) {
     const bounds = boundaries[letter];
-    if (!bounds) {
-      optionMap[letter] = '';
-      requiresOcr = true;
-      continue;
-    }
+    if (!bounds) { optionMap[letter] = ''; continue; }
 
-    const regionItems = items.filter(c =>
-      c !== labelItems[letter] &&
-      !ARABIC_LETTERS.includes(c.norm) &&
-      c.y >= bounds.yMin && c.y < bounds.yMax &&
-      c.x <= bounds.xMax && c.x > bounds.xMin
+    const regionItems = items.filter(c => 
+      c !== labelItems[letter] && !OPTION_LETTERS.includes(c.norm) &&
+      c.y >= bounds.yMin && c.y < bounds.yMax && c.x <= bounds.xMax && c.x > bounds.xMin
     );
 
     if (regionItems.length > 0) {
-      regionItems.sort((a, b) => {
-        if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
-        return b.x - a.x;
-      });
-      const rawText = regionItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
-      const cleanedText = fixArabicPDFText(rawText);
-      optionMap[letter] = cleanedText;
-      if (evaluateExtractionQuality(cleanedText, rawText)) requiresOcr = true;
-    } else {
-      optionMap[letter] = '';
-      requiresOcr = true;
+      regionItems.sort((a, b) => Math.abs(a.y - b.y) > 10 ? a.y - b.y : b.x - a.x);
+      const rawText = regionItems.map(c => c.norm).join(' ');
+      const { text, heuristicsApplied } = fixArabicPDFText(rawText);
+      optionMap[letter] = text;
+      if (!evaluateExtractionQuality(text, rawText, heuristicsApplied).failed) detectedCount++;
     }
   }
 
   return {
-    options: ARABIC_LETTERS.map(l => optionMap[l] || ''),
-    requiresOcr
+    options: OPTION_LETTERS.map(l => optionMap[l] || ''),
+    confidence: detectedCount / 4,
+    requiresOcr: (detectedCount / 4) < 0.5
   };
 }
 
 async function runTest(pdfPath) {
-  console.log(`\n\n--- Testing ${pdfPath} ---`);
-  if (!fs.existsSync(pdfPath)) {
-    console.log("File not found!");
-    return;
-  }
+  console.log(`\n=== Testing: ${path.basename(pdfPath)} ===`);
+  if (!fs.existsSync(pdfPath)) { console.log("File not found!"); return; }
+
   const data = new Uint8Array(fs.readFileSync(pdfPath));
   const doc = await pdfjsLib.getDocument({
-    data,
-    disableFontFace: true,
-    fontExtraProperties: true,
+    data, disableFontFace: true, fontExtraProperties: true,
     cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
     cMapPacked: true,
     standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/'
   }).promise;
 
-  let gId = 1;
-  for (let i = 1; i <= doc.numPages; i++) { 
+  let totalQ = 0;
+  for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
-    const viewport = page.getViewport({ scale: 2.5 });
-    const canvasHeight = viewport.height;
-
+    const viewport = page.getViewport({ scale: 2.0 });
     const textContent = await page.getTextContent();
-    const regions = detectQuestionRegions(textContent, canvasHeight, viewport);
+    const regions = detectQuestionRegions(textContent, viewport.width, viewport.height, viewport);
 
-    for (const region of regions) {
-      const result = findOptionBoundary(textContent, region.y1, region.y2, viewport);
-      console.log(`Q${gId} (Page ${i}): [OCR needed? ${result.requiresOcr}]`);
-      console.log(`   Options:`, result.options);
-      gId++;
+    for (const reg of regions) {
+      const result = findOptionBoundary(textContent, reg.y1, reg.y2, viewport);
+      totalQ++;
+      console.log(`Q${totalQ} (P${i}): Conf=${Math.round(result.confidence*100)}% Options: ${result.options.join(' | ')}`);
     }
   }
+  console.log(`--- Total Questions Detected: ${totalQ} ---`);
 }
 
 async function main() {
-  await runTest('121.pdf');
+  const args = process.argv.slice(2);
+  const pdfDir = 'tests';
+  const files = fs.readdirSync(pdfDir).filter(f => f.endsWith('.pdf'));
+
+  if (args.length > 0) {
+    const search = args[0];
+    const file = files.find(f => f.includes(search) || files.indexOf(f).toString() === search);
+    if (file) await runTest(path.join(pdfDir, file));
+    else console.log("No matching PDF found.");
+  } else {
+    for (const f of files) await runTest(path.join(pdfDir, f));
+  }
 }
 
 main().catch(console.error);

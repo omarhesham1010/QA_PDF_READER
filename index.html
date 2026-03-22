@@ -54,6 +54,12 @@
     </button>
     <input type="file" id="pdfInput" accept=".pdf" />
 
+    <!-- Debug Toggle -->
+    <label class="debug-toggle" style="display: flex; align-items: center; gap: 6px; margin-right: auto; color: #64748b; font-size: 14px; font-weight: 600; cursor: pointer; user-select: none;">
+      <input type="checkbox" id="debugModeCheckbox" onchange="toggleDebugMode()" style="accent-color: #3b82f6; width: 16px; height: 16px; cursor: pointer;" />
+      Debug Layout
+    </label>
+
     <!-- Export button -->
     <button id="exportBtn" disabled onclick="exportZip()">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
