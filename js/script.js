@@ -399,6 +399,76 @@ function selectAnswer(letter) {
   }
 }
 
+/**
+ * Enable editing for an MCQ option text.
+ * @param {Event} event 
+ * @param {string} letter - 'A' | 'B' | 'C' | 'D'
+ */
+function enableOptionEdit(event, letter) {
+  event.preventDefault();
+  event.stopPropagation(); // Avoid triggering selectAnswer
+  
+  const opt = document.getElementById(`opt-${letter}`);
+  const textEl = opt.querySelector('.answer-option-text');
+  
+  if (textEl.getAttribute('contenteditable') === 'true') return;
+  
+  textEl.setAttribute('contenteditable', 'true');
+  textEl.classList.add('editing');
+  textEl.focus();
+  
+  // Select all text
+  const range = document.createRange();
+  range.selectNodeContents(textEl);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+
+  // Save on blur or Enter
+  const onBlur = () => {
+    saveOptionEdit(letter);
+    textEl.removeEventListener('blur', onBlur);
+    textEl.removeEventListener('keydown', onKeydown);
+  };
+
+  const onKeydown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      textEl.blur();
+    }
+  };
+
+  textEl.addEventListener('blur', onBlur);
+  textEl.addEventListener('keydown', onKeydown);
+}
+
+/**
+ * Save the edited MCQ option text.
+ * @param {string} letter - 'A' | 'B' | 'C' | 'D'
+ */
+function saveOptionEdit(letter) {
+  if (appState.currentIndex < 0) return;
+  
+  const q = appState.questions[appState.currentIndex];
+  const opt = document.getElementById(`opt-${letter}`);
+  const textEl = opt.querySelector('.answer-option-text');
+  const newText = textEl.textContent.trim();
+  
+  textEl.setAttribute('contenteditable', 'false');
+  textEl.classList.remove('editing');
+  
+  const optionKeys = ['A', 'B', 'C', 'D'];
+  const idx = optionKeys.indexOf(letter);
+  
+  if (!q.optionTexts) {
+    // Initialize if it doesn't exist
+    q.optionTexts = q.options.slice(); 
+  }
+  q.optionTexts[idx] = newText;
+  
+  showToast('تم حفظ التعديل', 'success');
+}
+
 // ============================
 // MANUAL CROP ADJUSTMENT
 // ============================

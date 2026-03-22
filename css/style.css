@@ -591,6 +591,44 @@
       text-align: right;
       line-height: 1.5;
       flex: 1;
+      outline: none;
+      transition: all var(--transition);
+      border-radius: 4px;
+      padding: 2px 4px;
+    }
+
+    .answer-option-text.editing {
+      background: var(--bg-card);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+      color: var(--text-primary);
+    }
+
+    /* Edit option button */
+    .edit-opt-btn {
+      opacity: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all var(--transition);
+      flex-shrink: 0;
+      margin-right: 8px;
+    }
+
+    .answer-option:hover .edit-opt-btn {
+      opacity: 1;
+    }
+
+    .edit-opt-btn:hover {
+      background: var(--bg-hover);
+      color: var(--accent);
+      border-color: var(--accent);
     }
 
     .answer-option.selected .answer-option-text {
