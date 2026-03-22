@@ -208,7 +208,7 @@ function renderQuestionList() {
   const list = document.getElementById('question-list');
   if (!list) return;
   list.innerHTML = '';
-  
+
   appState.questions.forEach((q, idx) => {
     const item = document.createElement('div');
     item.className = 'q-item' + (q.correct ? ' answered' : '') + (q.requiresOcr ? ' needs-ocr' : '');
@@ -312,11 +312,8 @@ async function selectQuestion(idx) {
 
   document.getElementById('q-title').textContent = `السؤال ${q.id}`;
 
-  // Reset crop inputs to this question's adjustments
-  document.getElementById('cropTop').value = q.cropAdjust.top;
-  document.getElementById('cropBottom').value = q.cropAdjust.bottom;
-  document.getElementById('cropLeft').value = q.cropAdjust.left;
-  document.getElementById('cropRight').value = q.cropAdjust.right;
+  // Initialize Visual Cropper
+  await initVisualCropper(q);
 
   // Update answer radio buttons and display extracted option text
   const optionKeys = ['A', 'B', 'C', 'D'];
@@ -329,14 +326,14 @@ async function selectQuestion(idx) {
     // Show extracted option text if available, else generic label
     const textEl = opt.querySelector('.answer-option-text');
     let text = (q.optionTexts && q.optionTexts[i]) || `خيار ${letter}`;
-    
+
     // Apply numeral conversion if needed
     if (appState.numeralType === 'ar') {
       text = convertNumerals(text, true);
     } else if (appState.numeralType === 'en') {
       text = convertNumerals(text, false);
     }
-    
+
     textEl.textContent = text;
   });
 }
@@ -347,10 +344,10 @@ async function selectQuestion(idx) {
 async function renderWithDebugBoxes(q) {
   const canvas = document.getElementById('pdf-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
-  
+
   // Re-render the base image first
   await rerenderQuestionImage(q);
-  
+
   // Now draw the boxes on top of the CROP (need to offset by crop coords)
   const { region } = q._raw;
   const adj = q.cropAdjust;
@@ -364,7 +361,7 @@ async function renderWithDebugBoxes(q) {
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#ef4444'; // Red for the box
       ctx.strokeRect(b.xMin - offsetX, b.yMin - offsetY, (b.xMax - b.xMin), (b.yMax - b.yMin));
-      
+
       ctx.fillStyle = '#ef4444';
       ctx.font = 'bold 16px Inter, sans-serif';
       ctx.fillText(box.letter, b.xMin - offsetX + 5, b.yMin - offsetY + 20);
@@ -416,16 +413,16 @@ function selectAnswer(letter) {
 function enableOptionEdit(event, letter) {
   event.preventDefault();
   event.stopPropagation(); // Avoid triggering selectAnswer
-  
+
   const opt = document.getElementById(`opt-${letter}`);
   const textEl = opt.querySelector('.answer-option-text');
-  
+
   if (textEl.getAttribute('contenteditable') === 'true') return;
-  
+
   textEl.setAttribute('contenteditable', 'true');
   textEl.classList.add('editing');
   textEl.focus();
-  
+
   // Select all text
   const range = document.createRange();
   range.selectNodeContents(textEl);
@@ -457,24 +454,24 @@ function enableOptionEdit(event, letter) {
  */
 function saveOptionEdit(letter) {
   if (appState.currentIndex < 0) return;
-  
+
   const q = appState.questions[appState.currentIndex];
   const opt = document.getElementById(`opt-${letter}`);
   const textEl = opt.querySelector('.answer-option-text');
   const newText = textEl.textContent.trim();
-  
+
   textEl.setAttribute('contenteditable', 'false');
   textEl.classList.remove('editing');
-  
+
   const optionKeys = ['A', 'B', 'C', 'D'];
   const idx = optionKeys.indexOf(letter);
-  
+
   if (!q.optionTexts) {
     // Initialize if it doesn't exist
-    q.optionTexts = q.options.slice(); 
+    q.optionTexts = q.options.slice();
   }
   q.optionTexts[idx] = newText;
-  
+
   showToast('تم حفظ التعديل', 'success');
 }
 
@@ -484,24 +481,12 @@ function saveOptionEdit(letter) {
 
 /**
  * Re-crop the current question image with manual offset values.
+ * (DEPRECATED - replaced by visual cropper, but kept for compatibility if needed)
  */
 function applyManualCrop() {
   if (appState.currentIndex < 0) return;
   const q = appState.questions[appState.currentIndex];
-  const adj = {
-    top: parseInt(document.getElementById('cropTop').value) || 0,
-    bottom: parseInt(document.getElementById('cropBottom').value) || 0,
-    left: parseInt(document.getElementById('cropLeft').value) || 0,
-    right: parseInt(document.getElementById('cropRight').value) || 0,
-  };
-  q.cropAdjust = adj;
 
-  // Re-render from raw region + offset
-  const { region } = q._raw;
-  const canvas = document.getElementById('pdf-canvas');
-
-  // Re-render the page again to apply crop correctly
-  // (we re-render using stored pdfDoc)
   rerenderQuestionImage(q).then(dataUrl => {
     q.imageDataUrl = dataUrl;
     document.getElementById('q-image').src = dataUrl;
@@ -509,25 +494,261 @@ function applyManualCrop() {
   });
 }
 
+// ============================
+// VISUAL CROPPER
+// ============================
+
+let _cropperState = {
+  isDragging: false,
+  activeHandle: null,
+  startX: 0,
+  startY: 0,
+  initialBox: null,
+  q: null,
+  contextPadding: 150, // Match the value in rerenderQuestionImage
+  globalEventsSet: false
+};
+
+/**
+ * Initialize the visual cropper for the selected question.
+ */
+async function initVisualCropper(q) {
+  _cropperState.q = q;
+  const viewport = document.getElementById('cropper-viewport');
+  const img = document.getElementById('q-image');
+  const box = document.getElementById('crop-box');
+
+  // Show the region WITH context padding
+  const fullDataUrl = await rerenderQuestionImage(q, true);
+  img.src = fullDataUrl;
+
+  img.onload = () => {
+    updateCropUI(q);
+    // Setup events ONLY once globally
+    if (!_cropperState.eventsInitialized) {
+      setupCropperEvents();
+      _cropperState.eventsInitialized = true;
+    }
+  };
+}
+
+/**
+ * Update the crop box UI based on current question adjustments.
+ */
+function updateCropUI(q) {
+  const img = document.getElementById('q-image');
+  const box = document.getElementById('crop-box');
+  if (!img || !box || !img.clientWidth) return;
+
+  const imgW = img.clientWidth;
+  const imgH = img.clientHeight;
+
+  const { region } = q._raw;
+  const cropBottom = q._raw.imageCropBottom || region.y2;
+
+  // The 'full' image dimensions INCLUDE context padding
+  const fullW = (region.x2 - region.x1) + (_cropperState.contextPadding * 2);
+  const fullH = (cropBottom - region.y1) + (_cropperState.contextPadding * 2);
+
+  const scaleX = imgW / fullW;
+  const scaleY = imgH / fullH;
+
+  // The crop box starts at the index (contextPadding) relative to the top-left of the full image
+  // PLUS the user's manual cropAdjust increments.
+  const left = (_cropperState.contextPadding + q.cropAdjust.left) * scaleX;
+  const top = (_cropperState.contextPadding + q.cropAdjust.top) * scaleY;
+
+  const width = (region.x2 - region.x1 - q.cropAdjust.left - q.cropAdjust.right) * scaleX;
+  const height = (cropBottom - region.y1 - q.cropAdjust.top - q.cropAdjust.bottom) * scaleY;
+
+  box.style.left = left + 'px';
+  box.style.top = top + 'px';
+  box.style.width = width + 'px';
+  box.style.height = height + 'px';
+}
+
+/**
+ * Set up global interaction events (mouse + touch).
+ */
+function setupCropperEvents() {
+  const box = document.getElementById('crop-box');
+  if (!box) return;
+
+  // Dragging the whole box
+  const onBoxStart = (e) => {
+    // We don't stopPropagation here normally, but we need to identify the target
+    startDrag(e, 'move');
+  };
+  box.addEventListener('mousedown', onBoxStart);
+  box.addEventListener('touchstart', onBoxStart, { passive: false });
+
+  // Resizing via handles
+  document.querySelectorAll('.crop-handle').forEach(h => {
+    const handleType = h.getAttribute('data-handle');
+    const onHandleStart = (e) => {
+      e.stopPropagation(); // CRITICAL: Prevent bubbling to #crop-box (which triggers 'move')
+      startDrag(e, handleType);
+    };
+    h.addEventListener('mousedown', onHandleStart);
+    h.addEventListener('touchstart', onHandleStart, { passive: false });
+  });
+
+  // Global move/end listeners (only added once)
+  if (!_cropperState.globalEventsSet) {
+    window.addEventListener('mousemove', (e) => doDrag(e));
+    window.addEventListener('touchmove', (e) => doDrag(e), { passive: false });
+    window.addEventListener('mouseup', () => endDrag());
+    window.addEventListener('touchend', () => endDrag());
+    _cropperState.globalEventsSet = true;
+  }
+}
+
+function startDrag(e, handle = 'move') {
+  if (!_cropperState.q) return;
+
+  // Support both mouse and touch
+  const clientX = e.type.startsWith('touch') ? e.touches[0].clientX : e.clientX;
+  const clientY = e.type.startsWith('touch') ? e.touches[0].clientY : e.clientY;
+
+  e.preventDefault();
+  const box = document.getElementById('crop-box');
+
+  _cropperState.isDragging = true;
+  _cropperState.activeHandle = handle;
+  _cropperState.startX = clientX;
+  _cropperState.startY = clientY;
+  _cropperState.initialBox = {
+    left: parseFloat(box.style.left),
+    top: parseFloat(box.style.top),
+    width: parseFloat(box.style.width),
+    height: parseFloat(box.style.height)
+  };
+}
+
+function doDrag(e) {
+  if (!_cropperState.isDragging) return;
+  e.preventDefault();
+
+  const clientX = e.type.startsWith('touch') ? e.touches[0].clientX : e.clientX;
+  const clientY = e.type.startsWith('touch') ? e.touches[0].clientY : e.clientY;
+
+  const dx = clientX - _cropperState.startX;
+  const dy = clientY - _cropperState.startY;
+
+  const img = document.getElementById('q-image');
+  const box = document.getElementById('crop-box');
+  const init = _cropperState.initialBox;
+  const handle = _cropperState.activeHandle;
+
+  let newLeft = init.left;
+  let newTop = init.top;
+  let newWidth = init.width;
+  let newHeight = init.height;
+
+  // Constraints: keep box inside image
+  const maxW = img.clientWidth;
+  const maxH = img.clientHeight;
+
+  if (handle === 'move') {
+    newLeft = Math.max(0, Math.min(maxW - init.width, init.left + dx));
+    newTop = Math.max(0, Math.min(maxH - init.height, init.top + dy));
+  } else {
+    // Resizing
+    const minS = 30; // Min box size
+    if (handle.includes('l')) {
+      newLeft = Math.max(0, Math.min(init.left + init.width - minS, init.left + dx));
+      newWidth = init.width + (init.left - newLeft);
+    }
+    if (handle.includes('r')) {
+      newWidth = Math.max(minS, Math.min(maxW - init.left, init.width + dx));
+    }
+    if (handle.includes('t')) {
+      newTop = Math.max(0, Math.min(init.top + init.height - minS, init.top + dy));
+      newHeight = init.height + (init.top - newTop);
+    }
+    if (handle.includes('b')) {
+      newHeight = Math.max(minS, Math.min(maxH - init.top, init.height + dy));
+    }
+  }
+
+  box.style.left = newLeft + 'px';
+  box.style.top = newTop + 'px';
+  box.style.width = newWidth + 'px';
+  box.style.height = newHeight + 'px';
+
+  syncCropToState();
+}
+
+function syncCropToState() {
+  const q = _cropperState.q;
+  const img = document.getElementById('q-image');
+  const box = document.getElementById('crop-box');
+
+  const imgW = img.clientWidth;
+  const imgH = img.clientHeight;
+
+  const { region } = q._raw;
+  const cropBottom = q._raw.imageCropBottom || region.y2;
+
+  const fullW = (region.x2 - region.x1) + (_cropperState.contextPadding * 2);
+  const fullH = (cropBottom - region.y1) + (_cropperState.contextPadding * 2);
+
+  const scaleX = fullW / imgW;
+  const scaleY = fullH / imgH;
+
+  const left = parseFloat(box.style.left);
+  const top = parseFloat(box.style.top);
+  const width = parseFloat(box.style.width);
+  const height = parseFloat(box.style.height);
+
+  // Map UI box coordinates back to cropAdjust values
+  // Formula: UI_Left = (contextPadding + cropAdjust.left) * scale
+  // -> cropAdjust.left = (UI_Left / scale) - contextPadding
+  q.cropAdjust = {
+    left: Math.round((left * scaleX) - _cropperState.contextPadding),
+    top: Math.round((top * scaleY) - _cropperState.contextPadding),
+    right: Math.round(((imgW - (left + width)) * scaleX) - _cropperState.contextPadding),
+    bottom: Math.round(((imgH - (top + height)) * scaleY) - _cropperState.contextPadding)
+  };
+}
+
+function endDrag() {
+  if (!_cropperState.isDragging) return;
+  _cropperState.isDragging = false;
+
+  // Re-save question if needed (state is already updated in doDrag)
+  updateStats();
+}
+
+/**
+ * Reset to automatic/default crop.
+ */
+function resetCrop() {
+  if (!_cropperState.q) return;
+  _cropperState.q.cropAdjust = { top: 5, bottom: 15, left: 5, right: 5 };
+  updateCropUI(_cropperState.q);
+  showToast('تمت إعادة تعيين القص', 'success');
+}
+
 /**
  * Re-render a single question's image using stored raw crop region + adjustments.
  * @param {object} q - question object
  * @returns {Promise<string>} data URL
  */
-async function rerenderQuestionImage(q) {
+async function rerenderQuestionImage(q, full = false) {
   const canvas = document.getElementById('pdf-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
   const { region } = q._raw;
-  const adj = q.cropAdjust;
 
-  // Find which page this question is on by global id ordering
-  // We need to re-render the correct PDF page.
-  // For simplicity, we track pageNum in _raw during initial processing.
+  // When 'full' is true (for the cropper view), we add substantial padding 
+  // to give the user "smart" context around the question.
+  const contextPadding = full ? 150 : 0;
+  const adj = full ? { top: 0, bottom: 0, left: 0, right: 0 } : q.cropAdjust;
+
   const pageNum = q._raw.pageNum;
   if (!pageNum || !appState.pdfDoc) return q.imageDataUrl;
 
   const page = await appState.pdfDoc.getPage(pageNum);
-
   const viewport = page.getViewport({ scale: RENDER_SCALE });
   canvas.width = viewport.width;
   canvas.height = viewport.height;
@@ -540,12 +761,14 @@ async function rerenderQuestionImage(q) {
     viewport: viewport
   }).promise;
 
-  const x1 = Math.max(0, region.x1 + adj.left);
-  const y1 = Math.max(0, region.y1 + adj.top);
-  const x2 = Math.min(canvas.width, region.x2 - adj.right);
-  // Use imageCropBottom (stops before options) rather than full region.y2
+  // Calculate coordinates with context padding for the 'full' view
+  const x1 = Math.max(0, region.x1 - contextPadding + adj.left);
+  const y1 = Math.max(0, region.y1 - contextPadding + adj.top);
+
+  // Note: for the full view, we want to expand OUTWARDS, so we subtract from x1/y1 and add to x2/y2
+  const x2 = Math.min(canvas.width, region.x2 + contextPadding - adj.right);
   const cropBottom = q._raw.imageCropBottom || region.y2;
-  const y2 = Math.min(canvas.height, cropBottom - adj.bottom);
+  const y2 = Math.min(canvas.height, cropBottom + contextPadding - adj.bottom);
 
   return cropCanvasRegion(canvas, x1, y1, x2 - x1, y2 - y1);
 }
@@ -638,10 +861,10 @@ function updateStats() {
   // Header stats
   const totalEl = document.getElementById('header-stat-total');
   if (totalEl) totalEl.textContent = total;
-  
+
   const answeredEl = document.getElementById('header-stat-answered');
   if (answeredEl) answeredEl.textContent = answered;
-  
+
   const pctEl = document.getElementById('header-completion-pct');
   if (pctEl) pctEl.textContent = pct + '%';
 
@@ -738,7 +961,7 @@ function toggleNumerals() {
   appState.numeralType = appState.numeralType === 'en' ? 'ar' : 'en';
   document.documentElement.setAttribute('data-nums', appState.numeralType);
   localStorage.setItem('numeralType', appState.numeralType);
-  
+
   // Re-render current question to update display
   if (appState.currentIndex >= 0) {
     selectQuestion(appState.currentIndex);
@@ -754,7 +977,7 @@ function toggleNumerals() {
 function convertNumerals(text, toAr) {
   const en = '0123456789'.split('');
   const ar = '٠١٢٣٤٥٦٧٨٩'.split('');
-  
+
   if (toAr) {
     return text.replace(/[0-9]/g, (d) => ar[en.indexOf(d)]);
   } else {
@@ -852,7 +1075,7 @@ function evaluateExtractionQuality(text, rawText, heuristicsApplied = false) {
  */
 function findOptionBoundary(textContent, qY1, qY2, viewport) {
   const ARABIC_LETTERS = ['\u0623', '\u0628', '\u062c', '\u062f'];
-  const LATIN_LETTERS  = ['A', 'B', 'C', 'D'];
+  const LATIN_LETTERS = ['A', 'B', 'C', 'D'];
   const ALL_OPTION_LETTERS = [...ARABIC_LETTERS, ...LATIN_LETTERS];
 
   // Collect all text items in the question region
@@ -870,9 +1093,9 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   if (items.length === 0) return { firstOptionY: null, options: ['', '', '', ''], requiresOcr: true, metrics: {}, confidence: 0 };
 
   // Auto-detect: Latin A/B/C/D vs Arabic أ/ب/ج/د
-  const latinCount  = items.filter(it => LATIN_LETTERS.includes(it.norm)).length;
+  const latinCount = items.filter(it => LATIN_LETTERS.includes(it.norm)).length;
   const arabicCount = items.filter(it => ARABIC_LETTERS.includes(it.norm)).length;
-  const useLatin    = latinCount > arabicCount;
+  const useLatin = latinCount > arabicCount;
   const OPTION_LETTERS = useLatin ? LATIN_LETTERS : ARABIC_LETTERS;
 
   const optionRegex = useLatin
@@ -951,7 +1174,7 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   }
 
   rows.sort((a, b) => a.y - b.y);
-  
+
   // RTL sorting for Arabic, LTR sorting for Latin
   rows.forEach(row => {
     if (useLatin) {
