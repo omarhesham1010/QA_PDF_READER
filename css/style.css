@@ -8,6 +8,7 @@
     }
 
     :root {
+      /* Dark Theme (Default) */
       --bg-base: #0f1117;
       --bg-surface: #1a1d27;
       --bg-card: #22263a;
@@ -29,7 +30,26 @@
       --sidebar-w: 220px;
       --right-panel-w: 240px;
       --topbar-h: 64px;
-      --transition: 0.2s ease;
+      --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Light Theme */
+    [data-theme="light"] {
+      --bg-base: #f8fafc;
+      --bg-surface: #ffffff;
+      --bg-card: #f1f5f9;
+      --bg-hover: #e2e8f0;
+      --accent: #4f46e5;
+      --accent-light: #6366f1;
+      --accent-glow: rgba(79, 70, 229, 0.15);
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --text-primary: #1e293b;
+      --text-secondary: #475569;
+      --text-muted: #64748b;
+      --border: rgba(0, 0, 0, 0.05);
+      --border-strong: rgba(0, 0, 0, 0.1);
     }
 
     html,
@@ -151,139 +171,172 @@
       transform: none;
     }
 
-    /* File name display */
-    #fileName {
+    /* Theme Toggle */
+    #themeToggle {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all var(--transition);
+      margin-left: 10px;
+    }
+
+    #themeToggle:hover {
+      background: var(--bg-hover);
+      color: var(--accent);
+      transform: rotate(15deg);
+    }
+
+    #themeToggle svg .sun { display: none; }
+    #themeToggle svg .moon { display: block; }
+    
+    [data-theme="light"] #themeToggle svg .sun { display: block; }
+    [data-theme="light"] #themeToggle svg .moon { display: none; }
+
+    /* Header Stats */
+    #header-stats {
       font-size: 13px;
+      font-family: 'Inter', sans-serif;
+      font-weight: 500;
+    }
+
+    .header-stat {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .header-stat .label {
       color: var(--text-muted);
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    }
+
+    .header-stat .value {
+      color: var(--accent-light);
+      font-weight: 700;
+    }
+
+    #header-completion-pct {
+      background: var(--bg-card);
+      padding: 2px 8px;
+      border-radius: 12px;
+      color: var(--success);
+      font-size: 11px;
     }
 
     /* ========== LAYOUT ========== */
     #layout {
       display: grid;
-      grid-template-columns: var(--sidebar-w) 1fr var(--right-panel-w);
+      grid-template-columns: 1fr var(--right-panel-w);
       height: 100vh;
       padding-top: var(--topbar-h);
     }
 
-    /* ========== LEFT SIDEBAR ========== */
-    #sidebar {
-      background: var(--bg-surface);
-      border-left: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    #sidebar-header {
-      padding: 16px;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    #question-count {
-      background: var(--bg-card);
-      padding: 2px 8px;
-      border-radius: 20px;
-      font-size: 11px;
-      color: var(--accent);
-    }
-
     #question-list {
-      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+      gap: 8px;
+      max-height: 200px;
       overflow-y: auto;
-      padding: 8px;
+      padding: 4px;
+      margin-bottom: 20px;
     }
 
     .q-item {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 10px 12px;
-      border-radius: var(--radius-sm);
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
       cursor: pointer;
       transition: all var(--transition);
-      margin-bottom: 3px;
       position: relative;
     }
 
     .q-item:hover {
       background: var(--bg-hover);
+      border-color: var(--accent);
     }
 
     .q-item.active {
-      background: var(--accent-glow);
-      border: 1px solid rgba(108, 99, 255, 0.4);
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      box-shadow: 0 0 10px var(--accent-glow);
     }
 
     .q-item .q-number {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 700;
     }
 
     .q-item.active .q-number {
-      color: var(--accent-light);
+      color: #fff;
     }
 
-    .q-item.needs-ocr {
-      border-right: 3px solid var(--warning);
-    }
-
-    .ocr-icon {
-      font-size: 13px;
-      margin-right: 4px;
-      cursor: help;
-      opacity: 0.9;
-    }
-
+    /* Icons inside compact items */
     .q-item .q-badge {
-      margin-right: auto;
-      width: 8px;
-      height: 8px;
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
-      background: var(--text-muted);
-      opacity: 0.3;
+      background: var(--success);
+      border: 2px solid var(--bg-surface);
+      display: none;
     }
 
     .q-item.answered .q-badge {
-      background: var(--success);
-      opacity: 1;
+      display: block;
     }
 
-    /* Delete question button */
+    .q-item.needs-ocr::after {
+      content: '⚠️';
+      position: absolute;
+      top: -2px;
+      left: -2px;
+      font-size: 10px;
+    }
+
+    /* Updated Delete button for compact grid */
     .delete-q-btn {
-      opacity: 0;
-      background: transparent;
-      border: none;
-      color: var(--text-muted);
-      cursor: pointer;
-      padding: 4px;
-      border-radius: 4px;
-      transition: all var(--transition);
+      position: absolute;
+      bottom: -5px;
+      right: -5px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--danger);
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
+      font-size: 10px;
+      cursor: pointer;
+      opacity: 0;
+      transition: all var(--transition);
+      z-index: 5;
     }
 
     .q-item:hover .delete-q-btn {
       opacity: 1;
+      bottom: -2px;
+      right: -2px;
     }
 
     .delete-q-btn:hover {
       background: var(--danger);
       color: #fff;
-      transform: scale(1.1);
     }
 
     /* ========== CENTER PANEL ========== */

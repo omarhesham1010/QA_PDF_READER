@@ -205,25 +205,21 @@ function cropCanvasRegion(sourceCanvas, x, y, w, h) {
  */
 function renderQuestionList() {
   const list = document.getElementById('question-list');
+  if (!list) return;
   list.innerHTML = '';
-  document.getElementById('question-count').textContent = appState.questions.length;
-
+  
   appState.questions.forEach((q, idx) => {
     const item = document.createElement('div');
     item.className = 'q-item' + (q.correct ? ' answered' : '') + (q.requiresOcr ? ' needs-ocr' : '');
     item.id = `q-item-${idx}`;
 
-    let ocrIcon = q.requiresOcr ? '<span class="ocr-icon" title="جودة استخراج النص ضعيفة (تحتاج OCR)">⚠️</span>' : '';
     item.innerHTML = `
-      <span class="q-number">Q${q.id}</span>
+      <span class="q-number">${q.id}</span>
       <span class="q-badge"></span>
-      ${ocrIcon}
       <button class="delete-q-btn" onclick="deleteQuestion(event, ${idx})" title="حذف السؤال">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="3 6 5 6 21 6"></polyline>
-          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          <line x1="10" y1="11" x2="10" y2="17"></line>
-          <line x1="14" y1="11" x2="14" y2="17"></line>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
     `;
@@ -560,10 +556,21 @@ function updateStats() {
   const answered = appState.questions.filter(q => q.correct).length;
   const pct = total > 0 ? Math.round((answered / total) * 100) : 0;
 
-  document.getElementById('stat-total').textContent = total;
-  document.getElementById('stat-answered').textContent = answered;
-  document.getElementById('completion-bar').style.width = pct + '%';
-  document.getElementById('completion-text').textContent = `${pct}% مكتمل`;
+  // Header stats
+  const totalEl = document.getElementById('header-stat-total');
+  if (totalEl) totalEl.textContent = total;
+  
+  const answeredEl = document.getElementById('header-stat-answered');
+  if (answeredEl) answeredEl.textContent = answered;
+  
+  const pctEl = document.getElementById('header-completion-pct');
+  if (pctEl) pctEl.textContent = pct + '%';
+
+  // Show/Hide header stats
+  const headerStats = document.getElementById('header-stats');
+  if (headerStats) {
+    headerStats.style.display = total > 0 ? 'flex' : 'none';
+  }
 }
 
 // ============================
@@ -612,13 +619,34 @@ function showToast(msg, type = '') {
 function resetState() {
   appState.questions = [];
   appState.currentIndex = -1;
-  document.getElementById('question-list').innerHTML = '';
-  document.getElementById('question-count').textContent = '0';
+  const list = document.getElementById('question-list');
+  if (list) list.innerHTML = '';
   document.getElementById('exportBtn').disabled = true;
   document.getElementById('empty-state').style.display = '';
   document.getElementById('question-viewer').classList.remove('visible');
   updateStats();
 }
+
+// ============================
+// THEME TOGGLE
+// ============================
+
+/**
+ * Toggle between light and dark themes.
+ */
+function toggleTheme() {
+  const html = document.documentElement;
+  const currentTheme = html.getAttribute('data-theme') || 'dark';
+  const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+  html.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+}
+
+// Initialize theme on load
+(function initTheme() {
+  const savedTheme = localStorage.getItem('theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+})();
 
 // ============================
 // ARABIC TEXT CLEANUP
