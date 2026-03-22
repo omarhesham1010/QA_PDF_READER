@@ -199,6 +199,40 @@
     [data-theme="light"] #themeToggle svg .sun { display: block; }
     [data-theme="light"] #themeToggle svg .moon { display: none; }
 
+    /* Numeral Toggle */
+    #numeralToggle {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 0 12px;
+      height: 36px;
+      border-radius: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all var(--transition);
+      margin-left: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: 'Inter', sans-serif;
+    }
+
+    #numeralToggle:hover {
+      background: var(--bg-hover);
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    #numeralToggle .sep {
+      opacity: 0.3;
+      font-weight: 400;
+    }
+
+    /* Active states for numerals */
+    [data-nums="en"] #numeralToggle .en-nums { color: var(--accent); }
+    [data-nums="ar"] #numeralToggle .ar-nums { color: var(--accent); }
+
     /* Header Stats */
     #header-stats {
       font-size: 13px;

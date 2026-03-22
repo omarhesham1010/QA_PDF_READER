@@ -30,6 +30,7 @@ const appState = {
   questions: [],
   currentIndex: -1,
   pdfDoc: null,
+  numeralType: 'en', // 'en' | 'ar'
 };
 
 // ============================
@@ -327,8 +328,16 @@ async function selectQuestion(idx) {
 
     // Show extracted option text if available, else generic label
     const textEl = opt.querySelector('.answer-option-text');
-    const extracted = q.optionTexts && q.optionTexts[i];
-    textEl.textContent = extracted || `خيار ${letter}`;
+    let text = (q.optionTexts && q.optionTexts[i]) || `خيار ${letter}`;
+    
+    // Apply numeral conversion if needed
+    if (appState.numeralType === 'ar') {
+      text = convertNumerals(text, true);
+    } else if (appState.numeralType === 'en') {
+      text = convertNumerals(text, false);
+    }
+    
+    textEl.textContent = text;
   });
 }
 
@@ -716,6 +725,50 @@ function toggleTheme() {
 (function initTheme() {
   const savedTheme = localStorage.getItem('theme') || 'dark';
   document.documentElement.setAttribute('data-theme', savedTheme);
+})();
+
+// ============================
+// NUMERAL TOGGLE
+// ============================
+
+/**
+ * Toggle between English and Arabic numerals.
+ */
+function toggleNumerals() {
+  appState.numeralType = appState.numeralType === 'en' ? 'ar' : 'en';
+  document.documentElement.setAttribute('data-nums', appState.numeralType);
+  localStorage.setItem('numeralType', appState.numeralType);
+  
+  // Re-render current question to update display
+  if (appState.currentIndex >= 0) {
+    selectQuestion(appState.currentIndex);
+  }
+}
+
+/**
+ * Convert numerals in a string between English and Arabic.
+ * @param {string} text 
+ * @param {boolean} toAr - if true, English -> Arabic; else Arabic -> English
+ * @returns {string}
+ */
+function convertNumerals(text, toAr) {
+  const en = '0123456789'.split('');
+  const ar = '٠١٢٣٤٥٦٧٨٩'.split('');
+  
+  if (toAr) {
+    return text.replace(/[0-9]/g, (d) => ar[en.indexOf(d)]);
+  } else {
+    return text.replace(/[٠-٩]/g, (d) => en[ar.indexOf(d)]);
+  }
+}
+
+/**
+ * Initialize numeral preference.
+ */
+(function initNumerals() {
+  const saved = localStorage.getItem('numeralType') || 'en';
+  appState.numeralType = saved;
+  document.documentElement.setAttribute('data-nums', saved);
 })();
 
 // ============================
