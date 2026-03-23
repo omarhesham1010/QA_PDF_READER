@@ -13,10 +13,10 @@ const DETECT_PADDING = 10;
  * إعدادات قص الصورة الافتراضية (بالبكسل - على حجم الـ Canvas)
  */
 const GLOBAL_CROP = {
-  TOP: 5,
-  BOTTOM: 15,
-  LEFT: 5,
-  RIGHT: 5
+  TOP: 0,
+  BOTTOM: 0,
+  LEFT: 0,
+  RIGHT: 0
 };
 
 // ============================
@@ -210,8 +210,12 @@ function renderQuestionList() {
   list.innerHTML = '';
 
   appState.questions.forEach((q, idx) => {
+    const isMissing = q.optionTexts && q.optionTexts.some(t => !t || t === `خيار ${q.options[q.optionTexts.indexOf(t)]}`);
     const item = document.createElement('div');
-    item.className = 'q-item' + (q.correct ? ' answered' : '') + (q.requiresOcr ? ' needs-ocr' : '');
+    item.className = 'q-item' + 
+      (q.correct ? ' answered' : '') + 
+      (q.requiresOcr ? ' needs-ocr' : '') + 
+      (isMissing ? ' missing-options' : '');
     item.id = `q-item-${idx}`;
 
     item.innerHTML = `
@@ -284,6 +288,17 @@ function deleteQuestion(event, idx) {
  * @param {number} idx
  */
 async function selectQuestion(idx) {
+  // Fix race condition: Save any active edit before switching
+  const activeEditing = document.querySelector('.answer-option-text.editing');
+  if (activeEditing) {
+    // Determine which letter was being edited
+    const optLabel = activeEditing.closest('.answer-option');
+    if (optLabel) {
+      const letter = optLabel.id.replace('opt-', '');
+      saveOptionEdit(letter);
+    }
+  }
+
   const q = appState.questions[idx];
   if (!q) return;
 
@@ -326,6 +341,10 @@ async function selectQuestion(idx) {
     // Show extracted option text if available, else generic label
     const textEl = opt.querySelector('.answer-option-text');
     let text = (q.optionTexts && q.optionTexts[i]) || `خيار ${letter}`;
+    
+    // Visual cue for missing/defaulted options
+    const isDefault = !q.optionTexts || !q.optionTexts[i] || q.optionTexts[i] === `خيار ${letter}`;
+    opt.classList.toggle('missing', isDefault);
 
     // Apply numeral conversion if needed
     if (appState.numeralType === 'ar') {
@@ -457,22 +476,78 @@ function saveOptionEdit(letter) {
 
   const q = appState.questions[appState.currentIndex];
   const opt = document.getElementById(`opt-${letter}`);
+  if (!opt) return;
+
   const textEl = opt.querySelector('.answer-option-text');
-  const newText = textEl.textContent.trim();
+  let newText = textEl.textContent.trim();
+
+  // CLEANUP: Strip redundant markers (e.g. "A)", "1-", etc.)
+  newText = cleanOptionText(newText, letter);
 
   textEl.setAttribute('contenteditable', 'false');
   textEl.classList.remove('editing');
+  textEl.textContent = newText || `خيار ${letter}`; // Fallback if empty
 
   const optionKeys = ['A', 'B', 'C', 'D'];
   const idx = optionKeys.indexOf(letter);
 
   if (!q.optionTexts) {
-    // Initialize if it doesn't exist
     q.optionTexts = q.options.slice();
   }
+  
+  const oldText = q.optionTexts[idx];
   q.optionTexts[idx] = newText;
 
-  showToast('تم حفظ التعديل', 'success');
+  if (oldText !== newText) {
+    showToast('تم حفظ وتنظيف التعديل', 'success');
+    updateStats();
+    
+    // Update individual option UI
+    opt.classList.toggle('missing', !newText || newText === `خيار ${letter}`);
+    
+    // Update sidebar badge if missing status changed
+    const isAnyMissing = q.optionTexts.some((t, i) => !t || t === `خيار ${['A','B','C','D'][i]}`);
+    const listItem = document.getElementById(`q-item-${appState.currentIndex}`);
+    if (listItem) {
+      listItem.classList.toggle('missing-options', isAnyMissing);
+    }
+  }
+}
+
+/**
+ * Clean option text by removing redundant markers (e.g. "A)", "1-", etc.)
+ * @param {string} text 
+ * @param {string} letter 
+ * @returns {string}
+ */
+function cleanOptionText(text, letter) {
+  if (!text) return '';
+
+  // 1. Remove markers like "A)", "A-", "A.", "(A)", "A :"
+  // Supports both Latin (A-D) and Arabic (أ-د)
+  const arabicLetter = convertOptionLetterToArabic(letter);
+  const patterns = [
+    new RegExp(`^\\s*\\(?${letter}[\\)\\-\\.\\:\\/\\s]+`, 'i'),
+    new RegExp(`^\\s*\\(?${arabicLetter}[\\)\\-\\.\\:\\/\\s]+`)
+  ];
+
+  let cleaned = text;
+  patterns.forEach(p => {
+    cleaned = cleaned.replace(p, '');
+  });
+
+  // 2. Remove numeric markers like "1)", "1-", "1."
+  cleaned = cleaned.replace(/^\s*\d+[\)\-\.\:\/]\s*/, '');
+
+  return cleaned.trim();
+}
+
+/**
+ * Helper to get Arabic equivalent of A/B/C/D
+ */
+function convertOptionLetterToArabic(letter) {
+  const map = { 'A': 'أ', 'B': 'ب', 'C': 'ج', 'D': 'د' };
+  return map[letter] || letter;
 }
 
 // ============================
@@ -1003,37 +1078,141 @@ function convertNumerals(text, toAr) {
  * @param {string} text
  * @returns {string}
  */
+// ============================
+// ARABIC PDF TEXT NORMALIZATION PIPELINE
+// ============================
+
+const ARABIC_NORM_CONFIG = {
+  // 1. Corrupted characters to remove
+  garbageRegex: /[\uFFFD\u200B-\u200F\uFEFF]/g,
+
+  // 2. Normalization map (reduce variations)
+  normalizationMap: {
+    'إ': 'ا', 'أ': 'ا', 'آ': 'ا', 'ٱ': 'ا',
+    'ى': 'ي'
+  },
+
+  // 3. Common PDF Ligature/Artifact map
+  artifactMap: {
+    'األ': 'الأ',
+    'اإل': 'الإ',
+    'اآل': 'الآ',
+    'اال': 'الا',
+    'ىل': 'لى',
+    'ىع': 'عى',
+    'ىف': 'فى'
+  },
+
+  // 4. Expected Dictionary (Full words)
+  dictionary: [
+    'أكبر', 'أصغر', 'يساوي', 'المعطيات', 'كافية', 'غير',
+    'القيمتان', 'متساويتان', 'متساوية', 'متساويين',
+    'الأولى', 'الثانية', 'الثالثة', 'الرابعة'
+  ],
+
+  // 5. Short fragments -> Dictionary expanded matches
+  autocorrectMap: {
+    'أك': 'أكبر',
+    'أص': 'أصغر'
+    // 'غ': 'غير' // Removed to avoid "غير ير" issue; handled by context/fragment repair
+  }
+};
+
+/**
+ * Stage 1: Remove corrupted PDF characters.
+ */
+function removeCorruptedChars(text) {
+  return text.replace(ARABIC_NORM_CONFIG.garbageRegex, '');
+}
+
+/**
+ * Stage 2: Normalize letter variants to base forms.
+ */
+function normalizeArabicLetters(text) {
+  let result = text;
+  Object.entries(ARABIC_NORM_CONFIG.normalizationMap).forEach(([variant, base]) => {
+    result = result.split(variant).join(base);
+  });
+  return result;
+}
+
+/**
+ * Stage 3: Fix common PDF ligatures and extraction artifacts.
+ */
+function fixPdfArtifacts(text) {
+  let result = text;
+  Object.entries(ARABIC_NORM_CONFIG.artifactMap).forEach(([broken, fixed]) => {
+    result = result.split(broken).join(fixed);
+  });
+  return result;
+}
+
+/**
+ * Stage 4: Intelligently merge fragmented Arabic words.
+ */
+function repairFragments(text) {
+  // Merge fragments like "غ ير" or "الم عطيات"
+  // Logic: if a space is preceded/followed by parts of a dictionary word, merge them.
+  let result = text;
+  ARABIC_NORM_CONFIG.dictionary.forEach(word => {
+    if (word.length < 3) return;
+    for (let i = 1; i < word.length; i++) {
+        const part1 = word.substring(0, i);
+        const part2 = word.substring(i);
+        const broken = `${part1} ${part2}`;
+        result = result.split(broken).join(word);
+    }
+  });
+  return result;
+}
+
+/**
+ * Stage 5: Expand short fragments to expected dictionary terms.
+ */
+function applyDictionaryAutocorrect(text) {
+  let result = text;
+  // Stage 5: Expand short fragments to expected dictionary terms.
+  Object.entries(ARABIC_NORM_CONFIG.autocorrectMap).forEach(([short, full]) => {
+    const regex = new RegExp(`(^|\\s)${short}(?=\\s|$)`, 'g');
+    result = result.replace(regex, `$1${full}`);
+  });
+
+  // Specific contextual / legacy fixes
+  result = result.replace(/(^|\s)غ(?=\s+كافية)/g, '$1غير');
+  result = result.replace(/غير\s+كافية/g, 'غير كافية');
+  result = result.replace(/المعطيات\s+غير/g, 'المعطيات غير');
+  
+  return result;
+}
+
+/**
+ * Stage 6: Final whitespace normalization.
+ */
+function cleanWhitespace(text) {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Structured Arabic Normalization Pipeline.
+ * Replaces the old fragmented fixArabicPDFText logic.
+ * @param {string} text
+ * @returns {object} { text: string, heuristicsApplied: boolean }
+ */
 function fixArabicPDFText(text) {
   if (!text) return { text: '', heuristicsApplied: false };
   const original = text;
-
-  // إزالة أي رموز غير معرفة نتجت عن قراءة خاطئة للخط
-  text = text.replace(/\uFFFD/g, '');
-
-  // فك الكلمات المعكوسة الناتجة عن الـ PDF (خطوة أساسية للغة العربية)
-  text = text
-    .replace(/األ/g, 'الأ')
-    .replace(/اإل/g, 'الإ')
-    .replace(/اآل/g, 'الآ')
-    .replace(/اال/g, 'الا')
-    .replace(/ىل/g, 'لى')
-    .replace(/ىع/g, 'عى')
-    .replace(/ىف/g, 'فى');
-
-  // استعادة الكلمات المحذوفة بالكامل بسبب خطوط الأكاديميات التي لا تدعم تشفير بعض الحروف
-  text = text.replace(/(^|\s)أك(?=\s|$)/g, '$1أكبر');
-  text = text.replace(/أك$/g, 'أكبر');
-  text = text.replace(/أك\s/g, 'أكبر ');
-
-  text = text.replace(/غ\s*كافية/g, 'غير كافية');
-  text = text.replace(/^[يى]\s*المعطيات/g, 'المعطيات');
-  text = text.replace(/^[يى]\s*غير\s*كافية/g, 'المعطيات غير كافية');
-  if (text.trim() === 'ي' || text.trim() === 'ى' || text.trim() === 'غ') text = 'المعطيات غير كافية';
-
-  const cleaned = text.trim();
+  
+  let current = text;
+  current = removeCorruptedChars(current);
+  current = fixPdfArtifacts(current); // Artifacts first before normalization
+  current = normalizeArabicLetters(current);
+  current = repairFragments(current);
+  current = applyDictionaryAutocorrect(current);
+  current = cleanWhitespace(current);
+  
   return {
-    text: cleaned,
-    heuristicsApplied: original !== cleaned && cleaned.length > 0
+    text: current,
+    heuristicsApplied: original !== current && current.length > 0
   };
 }
 
@@ -1136,11 +1315,21 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   const bestCluster = megaclusters[0];
 
   const labelItems = {};
-  if (bestCluster) {
+  if (megaclusters.length > 0) {
+    // Collect the BEST instance of each letter across ALL clusters in the region
+    // This handles cases where markers are slightly misaligned vertically
     for (const letter of OPTION_LETTERS) {
-      const cands = bestCluster.candidates.filter(c => c.letter === letter).sort((a, b) => a.x - b.x);
-      if (cands.length > 0) {
-        labelItems[letter] = cands[cands.length - 1].item;
+      const allCandsForLetter = megaclusters
+        .flatMap(m => m.candidates)
+        .filter(c => c.letter === letter)
+        .sort((a, b) => a.x - b.x);
+      
+      if (allCandsForLetter.length > 0) {
+        // Pick the one that belongs to the largest cluster or is the most "stable"
+        // For now, just pick the rightmost for Arabic or leftmost for Latin? 
+        // No, let's pick the one from the largest cluster if possible.
+        const fromBestCluster = allCandsForLetter.find(c => bestCluster.candidates.includes(c));
+        labelItems[letter] = fromBestCluster ? fromBestCluster.item : allCandsForLetter[0].item;
       }
     }
   }
@@ -1175,9 +1364,13 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
 
   rows.sort((a, b) => a.y - b.y);
 
-  // RTL sorting for Arabic, LTR sorting for Latin
+  // Determine direction based on the actual labels found in the chosen cluster
+  const foundArabic = ARABIC_LETTERS.some(l => !!labelItems[l]);
+  const foundLatin = LATIN_LETTERS.some(l => !!labelItems[l]);
+  const finalUseLatin = (foundLatin && !foundArabic);
+
   rows.forEach(row => {
-    if (useLatin) {
+    if (finalUseLatin) {
       row.labels.sort((a, b) => a.item.x - b.item.x); // LTR
     } else {
       row.labels.sort((a, b) => b.item.x - a.item.x); // RTL
@@ -1187,44 +1380,99 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
   const boundaries = {};
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r];
+    const prevRow = rows[r - 1];
     const nextRow = rows[r + 1];
-    for (let i = 0; i < row.labels.length; i++) {
-      const pl = row.labels[i];
-      const nextPl = row.labels[i + 1];
-      boundaries[pl.letter] = {
-        yMin: row.y - 20,
-        yMax: nextRow ? nextRow.y - 10 : row.y + 40,
-        xMax: pl.item.x + 30,
-        xMin: nextPl ? nextPl.item.x + 20 : -Infinity
-      };
+
+    const yMin = prevRow ? (prevRow.y + row.y) / 2 : row.y - 25;
+    const yMax = nextRow ? (row.y + nextRow.y) / 2 : row.y + 50;
+
+    for (const pl of row.labels) {
+        boundaries[pl.letter] = { yMin, yMax };
     }
   }
 
   const optionMap = {};
   const metrics = {};
-  let totalFragments = 0;
-  let anyOptionCorruptedOrFragmented = false;
   const debugBoxes = [];
+  const optionBins = {};
+  OPTION_LETTERS.forEach(l => {
+    optionMap[l] = '';
+    optionBins[l] = [];
+    if (boundaries[l]) {
+        // For debug visualization: center around the label
+        debugBoxes.push({ 
+            letter: l, 
+            bounds: { 
+                yMin: boundaries[l].yMin, 
+                yMax: boundaries[l].yMax,
+                xMin: labelItems[l].x - 180, 
+                xMax: labelItems[l].x + 40
+            } 
+        });
+    }
+  });
 
-  for (const letter of OPTION_LETTERS) {
-    const bounds = boundaries[letter];
-    if (!bounds) {
-      optionMap[letter] = '';
-      metrics[letter] = { fragmentCount: 0, failed: true, reason: 'empty_region' };
-      continue;
+  // Assign every non-label item to its nearest label in the reading direction
+  for (const it of items) {
+    if (OPTION_LETTERS.includes(it.norm)) continue;
+    
+    // If this item was used as a label position, we need to extract the text PART
+    const usedAsLabelEntry = Object.entries(labelItems).find(([l, item]) => item === it);
+    let itemNorm = it.norm;
+    if (usedAsLabelEntry) {
+      const [letter, ] = usedAsLabelEntry;
+      const letterAr = convertOptionLetterToArabic(letter);
+      const patterns = [
+        new RegExp(`^\\s*\\(?${letter}[\\)\\-\\.\\:\\/\\s]+`, 'i'),
+        new RegExp(`^\\s*\\(?${letterAr}[\\)\\-\\.\\:\\/\\s]+`)
+      ];
+      patterns.forEach(p => { itemNorm = itemNorm.replace(p, ''); });
+      if (!itemNorm.trim()) continue; // Was ONLY a label
     }
 
-    debugBoxes.push({ letter, bounds });
+    let bestLetter = null;
+    let minDistance = Infinity;
 
-    const regionItems = items.filter(c =>
-      c !== labelItems[letter] &&
-      !OPTION_LETTERS.includes(c.norm) &&
-      c.y >= bounds.yMin && c.y < bounds.yMax &&
-      c.x <= bounds.xMax && c.x > bounds.xMin
-    );
+    for (const letter of OPTION_LETTERS) {
+      const bounds = boundaries[letter];
+      const labelItem = labelItems[letter];
+      if (!bounds || !labelItem) continue;
 
+      if (it.y >= bounds.yMin && it.y < bounds.yMax) {
+        if (finalUseLatin) {
+          const dx = it.x - labelItem.x;
+          if (dx > -15 && dx < minDistance) {
+            minDistance = dx;
+            bestLetter = letter;
+          }
+        } else {
+          // RTL: Label is to the RIGHT of the text
+          const dx = labelItem.x - it.x;
+          // Log for debugging Q3
+          if (it.norm.includes('القيمة')) {
+            console.log(`[DEBUG Proximity] Item: "${it.norm}", Label: ${letter}, dx: ${dx}`);
+          }
+          if (dx > -15 && dx < minDistance) {
+            minDistance = dx;
+            bestLetter = letter;
+          }
+        }
+      }
+    }
+
+    if (bestLetter) {
+        // Carry the simplified/stripped text if it was a combined object
+        const itToPush = usedAsLabelEntry ? { ...it, norm: itemNorm.trim() } : it;
+        optionBins[bestLetter].push(itToPush);
+    }
+  }
+
+  let totalFragments = 0;
+  let anyOptionCorruptedOrFragmented = false;
+
+  for (const letter of OPTION_LETTERS) {
+    const regionItems = optionBins[letter];
     if (regionItems.length > 0) {
-      // Deduplicate overlapping items (bold rendering artifact)
       const uniqueItems = [];
       for (const it of regionItems) {
         const isDupe = uniqueItems.some(u =>
@@ -1233,9 +1481,10 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
         if (!isDupe) uniqueItems.push(it);
       }
       uniqueItems.sort((a, b) => {
-        if (Math.abs(a.y - b.y) > 10) return a.y - b.y;
-        return b.x - a.x;
+        if (Math.abs(a.y - b.y) > 8) return a.y - b.y;
+        return finalUseLatin ? a.x - b.x : b.x - a.x;
       });
+
       const rawText = uniqueItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
       const { text: cleanedText, heuristicsApplied } = fixArabicPDFText(rawText);
       optionMap[letter] = cleanedText;
@@ -1250,7 +1499,6 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
         heuristicsApplied
       };
     } else {
-      optionMap[letter] = '';
       metrics[letter] = { fragmentCount: 0, text: '', failed: true, reason: 'empty_region' };
     }
   }
