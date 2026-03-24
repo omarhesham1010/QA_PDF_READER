@@ -54,6 +54,18 @@
     </button>
     <input type="file" id="pdfInput" accept=".pdf" />
 
+    <!-- ZIP resume button -->
+    <button id="importZipBtn" onclick="document.getElementById('zipInput').click()" title="استئناف جلسة عمل سابقة من ملف ZIP">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="17 8 12 3 7 8" />
+        <line x1="12" y1="3" x2="12" y2="15" />
+        <line x1="9" y1="11" x2="15" y2="11" />
+      </svg>
+      استئناف ZIP
+    </button>
+    <input type="file" id="zipInput" accept=".zip" />
+
     <!-- Header Stats -->
     <div id="header-stats"
       style="display: none; align-items: center; gap: 15px; margin-right: 20px; padding: 0 15px; border-right: 1px solid var(--border); height: 30px;">

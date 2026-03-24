@@ -73,6 +73,16 @@ document.getElementById('pdfInput').addEventListener('change', async (e) => {
 });
 
 /**
+ * Handle ZIP file selection for session restore.
+ */
+document.getElementById('zipInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  await importZip(file);
+  e.target.value = '';
+});
+
+/**
  * Iterate over all PDF pages, render each to a canvas,
  * detect question blocks, and capture screenshots.
  * @param {import('pdfjs-dist').PDFDocumentProxy} pdfDoc
@@ -212,9 +222,9 @@ function renderQuestionList() {
   appState.questions.forEach((q, idx) => {
     const isMissing = q.optionTexts && q.optionTexts.some(t => !t || t === `خيار ${q.options[q.optionTexts.indexOf(t)]}`);
     const item = document.createElement('div');
-    item.className = 'q-item' + 
-      (q.correct ? ' answered' : '') + 
-      (q.requiresOcr ? ' needs-ocr' : '') + 
+    item.className = 'q-item' +
+      (q.correct ? ' answered' : '') +
+      (q.requiresOcr ? ' needs-ocr' : '') +
       (isMissing ? ' missing-options' : '');
     item.id = `q-item-${idx}`;
 
@@ -327,8 +337,15 @@ async function selectQuestion(idx) {
 
   document.getElementById('q-title').textContent = `السؤال ${q.id}`;
 
-  // Initialize Visual Cropper
-  await initVisualCropper(q);
+  // Initialize Visual Cropper (only if question has raw PDF data)
+  if (q._raw && appState.pdfDoc) {
+    await initVisualCropper(q);
+  } else {
+    // ZIP-imported question: show stored image, hide crop controls
+    document.getElementById('q-image').src = q.imageDataUrl;
+    document.getElementById('cropper-overlay').style.display = 'none';
+    document.getElementById('resetCropBtn').style.display = 'none';
+  }
 
   // Update answer radio buttons and display extracted option text
   const optionKeys = ['A', 'B', 'C', 'D'];
@@ -341,7 +358,7 @@ async function selectQuestion(idx) {
     // Show extracted option text if available, else generic label
     const textEl = opt.querySelector('.answer-option-text');
     let text = (q.optionTexts && q.optionTexts[i]) || `خيار ${letter}`;
-    
+
     // Visual cue for missing/defaulted options
     const isDefault = !q.optionTexts || !q.optionTexts[i] || q.optionTexts[i] === `خيار ${letter}`;
     opt.classList.toggle('missing', isDefault);
@@ -494,19 +511,19 @@ function saveOptionEdit(letter) {
   if (!q.optionTexts) {
     q.optionTexts = q.options.slice();
   }
-  
+
   const oldText = q.optionTexts[idx];
   q.optionTexts[idx] = newText;
 
   if (oldText !== newText) {
     showToast('تم حفظ وتنظيف التعديل', 'success');
     updateStats();
-    
+
     // Update individual option UI
     opt.classList.toggle('missing', !newText || newText === `خيار ${letter}`);
-    
+
     // Update sidebar badge if missing status changed
-    const isAnyMissing = q.optionTexts.some((t, i) => !t || t === `خيار ${['A','B','C','D'][i]}`);
+    const isAnyMissing = q.optionTexts.some((t, i) => !t || t === `خيار ${['A', 'B', 'C', 'D'][i]}`);
     const listItem = document.getElementById(`q-item-${appState.currentIndex}`);
     if (listItem) {
       listItem.classList.toggle('missing-options', isAnyMissing);
@@ -922,6 +939,113 @@ async function exportZip() {
 }
 
 // ============================
+// ZIP IMPORT (SESSION RESTORE)
+// ============================
+
+/**
+ * Import a previously exported ZIP to restore a session.
+ * Reads questions.json + question images and rebuilds appState.
+ * @param {File} file
+ */
+async function importZip(file) {
+  const btn = document.getElementById('importZipBtn');
+  const origContent = btn.innerHTML;
+  btn.innerHTML = '<div class="spinner"></div> جاري التحميل...';
+  btn.disabled = true;
+
+  try {
+    showProgress('جاري قراءة الـ ZIP...', 10);
+
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+
+    // Read questions.json
+    const jsonFile = zip.file('questions.json');
+    if (!jsonFile) {
+      showToast('ملف ZIP غير صالح: لا يحتوي على questions.json', 'error');
+      return;
+    }
+
+    const jsonText = await jsonFile.async('text');
+    const data = JSON.parse(jsonText);
+
+    if (!data.questions || data.questions.length === 0) {
+      showToast('لا توجد أسئلة في ملف ZIP', 'error');
+      return;
+    }
+
+    resetState();
+    appState.pdfDoc = null; // No PDF available in ZIP mode
+    document.getElementById('fileName').textContent = file.name;
+
+    // Reset cropper visibility (in case previous session had it hidden)
+    document.getElementById('cropper-overlay').style.display = '';
+    document.getElementById('resetCropBtn').style.display = '';
+
+    const total = data.questions.length;
+    const questions = [];
+
+    for (let i = 0; i < total; i++) {
+      const item = data.questions[i];
+      showProgress(`جاري استعادة السؤال ${i + 1} من ${total}...`, 10 + Math.round((i / total) * 85));
+
+      // Load image from ZIP
+      let imageDataUrl = null;
+      const imgFile = zip.file(item.image);
+      if (imgFile) {
+        const base64 = await imgFile.async('base64');
+        imageDataUrl = 'data:image/png;base64,' + base64;
+      }
+
+      // options array is the displayed text for each choice
+      const optionTexts = item.options || ['', '', '', ''];
+
+      // Reverse-map correct answer text back to A/B/C/D letter
+      let correctLetter = null;
+      if (item.correct) {
+        const idx = optionTexts.indexOf(item.correct);
+        if (idx !== -1) {
+          correctLetter = ['A', 'B', 'C', 'D'][idx];
+        } else if (['A', 'B', 'C', 'D'].includes(item.correct)) {
+          correctLetter = item.correct;
+        }
+      }
+
+      questions.push({
+        id: item.id,
+        imageDataUrl,
+        options: ['A', 'B', 'C', 'D'],
+        optionTexts,
+        correct: correctLetter,
+        cropAdjust: { top: 0, bottom: 0, left: 0, right: 0 },
+        requiresOcr: item.requiresOCR || false,
+        confidence: item.confidence || 1,
+        metrics: item.optionsMetrics || {},
+        _raw: null  // No PDF raw data — ZIP mode
+      });
+    }
+
+    appState.questions = questions;
+    showProgress('جاري عرض الأسئلة...', 98);
+
+    renderQuestionList();
+    document.getElementById('exportBtn').disabled = false;
+    updateStats();
+    hideProgress();
+
+    await selectQuestion(0);
+
+    showToast(`✓ تم استعادة ${total} سؤال من الـ ZIP`, 'success');
+
+  } catch (err) {
+    showToast('خطأ في قراءة الـ ZIP: ' + err.message, 'error');
+    hideProgress();
+  } finally {
+    btn.innerHTML = origContent;
+    btn.disabled = false;
+  }
+}
+
+// ============================
 // STATS
 // ============================
 
@@ -1107,7 +1231,7 @@ const ARABIC_NORM_CONFIG = {
   dictionary: [
     'أكبر', 'أصغر', 'يساوي', 'المعطيات', 'كافية', 'غير',
     'القيمتان', 'متساويتان', 'متساوية', 'متساويين',
-    'الأولى', 'الثانية', 'الثالثة', 'الرابعة'
+    'الأولى', 'الثانية', 'الثالثة', 'الرابعة', 'بين', 'قارن'
   ],
 
   // 5. Short fragments -> Dictionary expanded matches
@@ -1157,10 +1281,10 @@ function repairFragments(text) {
   ARABIC_NORM_CONFIG.dictionary.forEach(word => {
     if (word.length < 3) return;
     for (let i = 1; i < word.length; i++) {
-        const part1 = word.substring(0, i);
-        const part2 = word.substring(i);
-        const broken = `${part1} ${part2}`;
-        result = result.split(broken).join(word);
+      const part1 = word.substring(0, i);
+      const part2 = word.substring(i);
+      const broken = `${part1} ${part2}`;
+      result = result.split(broken).join(word);
     }
   });
   return result;
@@ -1171,17 +1295,22 @@ function repairFragments(text) {
  */
 function applyDictionaryAutocorrect(text) {
   let result = text;
-  // Stage 5: Expand short fragments to expected dictionary terms.
+
   Object.entries(ARABIC_NORM_CONFIG.autocorrectMap).forEach(([short, full]) => {
-    const regex = new RegExp(`(^|\\s)${short}(?=\\s|$)`, 'g');
-    result = result.replace(regex, `$1${full}`);
+    const regex = new RegExp(`\\b${short}\\b`, 'g');
+    result = result.replace(regex, full);
   });
 
-  // Specific contextual / legacy fixes
+  // Fix common phrases
+  console.log(result);
+  result = result.replace(/القيمة\s+الأولى\s+أك/g, 'القيمة الأولى أكبر');
+  result = result.replace(/القيمة\s+الثانية\s+أك/g, 'القيمة الثانية أكبر');
+
+  // existing fixes
+  result = result.replace(/(^|\s)[يى]\s*(?=المعطيات)/g, '$1');
   result = result.replace(/(^|\s)غ(?=\s+كافية)/g, '$1غير');
   result = result.replace(/غير\s+كافية/g, 'غير كافية');
-  result = result.replace(/المعطيات\s+غير/g, 'المعطيات غير');
-  
+
   return result;
 }
 
@@ -1201,7 +1330,7 @@ function cleanWhitespace(text) {
 function fixArabicPDFText(text) {
   if (!text) return { text: '', heuristicsApplied: false };
   const original = text;
-  
+
   let current = text;
   current = removeCorruptedChars(current);
   current = fixPdfArtifacts(current); // Artifacts first before normalization
@@ -1209,7 +1338,7 @@ function fixArabicPDFText(text) {
   current = repairFragments(current);
   current = applyDictionaryAutocorrect(current);
   current = cleanWhitespace(current);
-  
+
   return {
     text: current,
     heuristicsApplied: original !== current && current.length > 0
@@ -1265,7 +1394,9 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     const [cx, cy] = viewport.convertToViewportPoint(pdfX, pdfY);
     if (cy >= qY1 && cy <= qY2) {
       const norm = item.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
-      if (norm) items.push({ norm, y: cy, x: cx });
+      // Store width to help with intelligent gap detection
+      const width = item.width * viewport.scale;
+      if (norm) items.push({ norm, y: cy, x: cx, w: width });
     }
   }
 
@@ -1323,7 +1454,7 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
         .flatMap(m => m.candidates)
         .filter(c => c.letter === letter)
         .sort((a, b) => a.x - b.x);
-      
+
       if (allCandsForLetter.length > 0) {
         // Pick the one that belongs to the largest cluster or is the most "stable"
         // For now, just pick the rightmost for Arabic or leftmost for Latin? 
@@ -1387,7 +1518,7 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     const yMax = nextRow ? (row.y + nextRow.y) / 2 : row.y + 50;
 
     for (const pl of row.labels) {
-        boundaries[pl.letter] = { yMin, yMax };
+      boundaries[pl.letter] = { yMin, yMax };
     }
   }
 
@@ -1399,28 +1530,28 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     optionMap[l] = '';
     optionBins[l] = [];
     if (boundaries[l]) {
-        // For debug visualization: center around the label
-        debugBoxes.push({ 
-            letter: l, 
-            bounds: { 
-                yMin: boundaries[l].yMin, 
-                yMax: boundaries[l].yMax,
-                xMin: labelItems[l].x - 180, 
-                xMax: labelItems[l].x + 40
-            } 
-        });
+      // For debug visualization: center around the label
+      debugBoxes.push({
+        letter: l,
+        bounds: {
+          yMin: boundaries[l].yMin,
+          yMax: boundaries[l].yMax,
+          xMin: labelItems[l].x - 180,
+          xMax: labelItems[l].x + 40
+        }
+      });
     }
   });
 
   // Assign every non-label item to its nearest label in the reading direction
   for (const it of items) {
     if (OPTION_LETTERS.includes(it.norm)) continue;
-    
+
     // If this item was used as a label position, we need to extract the text PART
     const usedAsLabelEntry = Object.entries(labelItems).find(([l, item]) => item === it);
     let itemNorm = it.norm;
     if (usedAsLabelEntry) {
-      const [letter, ] = usedAsLabelEntry;
+      const [letter,] = usedAsLabelEntry;
       const letterAr = convertOptionLetterToArabic(letter);
       const patterns = [
         new RegExp(`^\\s*\\(?${letter}[\\)\\-\\.\\:\\/\\s]+`, 'i'),
@@ -1461,9 +1592,9 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     }
 
     if (bestLetter) {
-        // Carry the simplified/stripped text if it was a combined object
-        const itToPush = usedAsLabelEntry ? { ...it, norm: itemNorm.trim() } : it;
-        optionBins[bestLetter].push(itToPush);
+      // Carry the simplified/stripped text if it was a combined object
+      const itToPush = usedAsLabelEntry ? { ...it, norm: itemNorm.trim() } : it;
+      optionBins[bestLetter].push(itToPush);
     }
   }
 
@@ -1485,7 +1616,37 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
         return finalUseLatin ? a.x - b.x : b.x - a.x;
       });
 
-      const rawText = uniqueItems.map(c => c.norm).join(' ').replace(/\s+/g, ' ').trim();
+      // INTELLIGENT FRAGMENT MERGING based on horizontal gap
+      let rawText = '';
+      for (let i = 0; i < uniqueItems.length; i++) {
+        const cur = uniqueItems[i];
+        const next = uniqueItems[i + 1];
+        rawText += cur.norm;
+        if (next) {
+          const sameLine = Math.abs(cur.y - next.y) < 8;
+          // Calculate horizontal gap between current and next
+          let gap = Infinity;
+          if (finalUseLatin) {
+            gap = next.x - (cur.x + cur.w);
+          } else {
+            // RTL: Fragment to the left is next in order
+            gap = cur.x - (next.x + next.w);
+          }
+
+          // Calculate dynamic threshold based on average glyph width
+          const avgWidth = (cur.w + (next.w || cur.w)) / 2;
+          const dynamicGap = avgWidth * 0.45;
+
+          // If fragments are closer than the dynamic threshold, join without space
+          if (!(sameLine && gap < dynamicGap)) {
+            // merge without space
+          } else {
+            rawText += ' ';
+          }
+        }
+      }
+      rawText = rawText.replace(/\s+/g, ' ').trim();
+
       const { text: cleanedText, heuristicsApplied } = fixArabicPDFText(rawText);
       optionMap[letter] = cleanedText;
       const evalQuality = evaluateExtractionQuality(cleanedText, rawText, heuristicsApplied);

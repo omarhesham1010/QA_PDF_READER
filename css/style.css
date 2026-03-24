@@ -142,6 +142,44 @@ body {
   display: none;
 }
 
+/* ZIP Import (Resume) button */
+#importZipBtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--success);
+  font-size: 14px;
+  font-weight: 600;
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+#importZipBtn:hover {
+  background: var(--success);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(34, 197, 94, 0.3);
+}
+
+#importZipBtn:active {
+  transform: translateY(0);
+}
+
+#importZipBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+#zipInput {
+  display: none;
+}
+
 /* Export button */
 #exportBtn {
   display: inline-flex;
