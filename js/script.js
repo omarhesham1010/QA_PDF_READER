@@ -113,73 +113,105 @@ function toggleDebugMode() {
  * @returns {Array<{x1:number,y1:number,x2:number,y2:number}>}
  */
 function detectQuestionRegions(textContent, canvasWidth, canvasHeight, viewport) {
-  // Collect Y positions (in canvas px) where "السؤال" is found.
-  // We normalize each text item by stripping Tatweel/Kashida (ـ U+0640)
-  // characters before matching, because many Arabic PDFs elongate letters
-  // with kashida (e.g. "السـؤال" instead of "السؤال").
-  const KASHIDA = '\u0640'; // Arabic Tatweel character
-  const questionYPositions = [];
+  const KASHIDA = '\u0640';
+  const numericMarkerRegex = /^\s*(\d+|[A-Za-z])\s*[\.\-\)]\s*$/;
+  const commonNumberedPattern = /^\s*\d+\s*[\.\-\)]\s+/;
 
+  // Helper to build regions from Y positions
+  const buildResult = (yPositions) => {
+    yPositions.sort((a, b) => a.y - b.y);
+    const results = [];
+    for (let i = 0; i < yPositions.length; i++) {
+      const y1 = Math.max(0, yPositions[i].y - DETECT_PADDING);
+      const y2 = i + 1 < yPositions.length
+        ? Math.min(canvasHeight, yPositions[i + 1].y - DETECT_PADDING)
+        : canvasHeight;
+      results.push({ x1: 0, y1, x2: canvasWidth, y2 });
+    }
+    return results;
+  };
+
+  // --- TIER 1: EXPLICIT MARKERS ---
+  const explicitY = [];
   for (const item of textContent.items) {
     if (!item.str) continue;
-    // Normalize: remove kashida + collapse repeated whitespace
     const normalized = item.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
-    // Support both Arabic 'السؤال' and Latin 'Question'
     if (normalized.includes('السؤال') || normalized.toLowerCase().startsWith('question') || normalized.toLowerCase().startsWith('q:')) {
-      // Transform PDF coordinates to canvas pixel coordinates
-      // item.transform = [scaleX, skewX, skewY, scaleY, x, y]
       const [, , , , pdfX, pdfY] = item.transform;
-      // convert PDF user space to canvas pixels using viewport
       const [canvasX, canvasY] = viewport.convertToViewportPoint(pdfX, pdfY);
-      questionYPositions.push({ y: canvasY, x: canvasX });
+      explicitY.push({ y: canvasY, x: canvasX });
     }
   }
+  if (explicitY.length > 0) return buildResult(explicitY);
 
-  if (questionYPositions.length === 0) {
-    // FALLBACK for PDFs that don't use 'السؤال'
-    // Support both Arabic (أ ب ج د) and Latin (A B C D) option labels
-    const pageText = textContent.items.map(it => it.str).join(' ');
-
-    const arabicRegex = /(?<![\u0621-\u064A])([\u0623\u0628\u062c\u062f])(?![\u0621-\u064A])/g;
-    const arabicMatches = pageText.match(arabicRegex);
-    const uniqueArabic = new Set(arabicMatches || []);
-
-    const latinRegex = /(?<![A-Za-z])([ABCD])(?![A-Za-z])/g;
-    const latinMatches = pageText.match(latinRegex);
-    const uniqueLatin = new Set(latinMatches || []);
-
-    const isAnswerKey = pageText.includes('الإجابات') && !pageText.includes('قارن');
-    const isCoverPage = textContent.items.length < 20;
-
-    const hasArabicOptions = uniqueArabic.size >= 3;
-    const hasLatinOptions = uniqueLatin.size >= 3;
-
-    if ((hasArabicOptions || hasLatinOptions) && !isAnswerKey && !isCoverPage) {
-      // Fix: Added x1, x2 to ensure image captures full width
-      return [{ x1: 0, y1: 0, x2: canvasWidth, y2: canvasHeight, qIdx: 0 }];
+  // --- TIER 2: NUMERIC MARKERS ---
+  const numericY = [];
+  for (const item of textContent.items) {
+    if (!item.str) continue;
+    const normalized = item.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
+    if (numericMarkerRegex.test(normalized) || commonNumberedPattern.test(normalized)) {
+      const [, , , , pdfX, pdfY] = item.transform;
+      const [canvasX, canvasY] = viewport.convertToViewportPoint(pdfX, pdfY);
+      const isOnRightEdge = canvasX > (canvasWidth * 0.75);
+      const isOnLeftEdge = canvasX < (canvasWidth * 0.25);
+      if (isOnRightEdge || isOnLeftEdge) {
+        numericY.push({ y: canvasY, x: canvasX });
+      }
     }
-    return [];
+  }
+  if (numericY.length > 0) return buildResult(numericY);
+
+  // --- TIER 3: CLUSTERING FALLBACK ---
+  const pageText = textContent.items.map(it => it.str).join(' ');
+  const isAnswerKey = pageText.includes('الإجابات') && !pageText.includes('قارن');
+  const isCoverPage = textContent.items.length < 20;
+  if (isAnswerKey || isCoverPage || textContent.items.length > 2500) return [];
+
+  const ARABIC_REGEX = /(?<![\u0621-\u064A])([\u0623\u0628\u062c\u062f])(?![\u0621-\u064A])/;
+  const LATIN_REGEX = /(?<![A-Za-z])([ABCD])(?![A-Za-z])/;
+  const markerCands = [];
+  for (const it of textContent.items) {
+    if (!it.str) continue;
+    const norm = it.str.replace(/\u0640/g, '').replace(/\s+/g, ' ').trim();
+    const matchAr = norm.match(ARABIC_REGEX);
+    const matchLat = norm.match(LATIN_REGEX);
+    const letter = (matchAr && matchAr[1]) || (matchLat && matchLat[1]);
+    if (letter) {
+      const [, , , , pdfX, pdfY] = it.transform;
+      const [cx, cy] = viewport.convertToViewportPoint(pdfX, pdfY);
+      markerCands.push({ letter, y: cy });
+    }
+  }
+  if (markerCands.length < 3) return [];
+
+  const clusters = [];
+  for (const c of markerCands) {
+    let merged = false;
+    for (const cl of clusters) {
+      if (Math.abs(cl.y - c.y) <= 80) {
+        cl.items.push(c); cl.letters.add(c.letter);
+        cl.y = (cl.y * (cl.items.length - 1) + c.y) / cl.items.length;
+        merged = true; break;
+      }
+    }
+    if (!merged) clusters.push({ y: c.y, items: [c], letters: new Set([c.letter]) });
   }
 
-  // Sort by Y (top to bottom)
-  questionYPositions.sort((a, b) => a.y - b.y);
+  const validClusters = clusters.filter(cl => cl.letters.size >= 3 && cl.items.length >= 3).sort((a, b) => a.y - b.y);
+  if (validClusters.length === 0) return [];
+  if (validClusters.length === 1) return [{ x1: 0, y1: 0, x2: canvasWidth, y2: canvasHeight }];
 
-  // Build regions: from each question Y to the next question Y (or page bottom)
   const regions = [];
-  for (let i = 0; i < questionYPositions.length; i++) {
-    const y1 = Math.max(0, questionYPositions[i].y - DETECT_PADDING);
-    const y2 = i + 1 < questionYPositions.length
-      ? Math.min(canvasHeight, questionYPositions[i + 1].y - DETECT_PADDING)
-      : canvasHeight;
-
-    regions.push({
-      x1: 0,
-      y1,
-      x2: canvasWidth,
-      y2,
-    });
+  let lastY = 0;
+  for (let i = 0; i < validClusters.length; i++) {
+    const cluster = validClusters[i];
+    const nextCluster = validClusters[i + 1];
+    const topBias = 0.8;
+    const top = i === 0 ? 0 : lastY + ((cluster.y - lastY) * (1 - topBias));
+    const bottom = nextCluster ? (cluster.y + nextCluster.y) / 2 : canvasHeight;
+    regions.push({ x1: 0, y1: top, x2: canvasWidth, y2: bottom });
+    lastY = cluster.y;
   }
-
   return regions;
 }
 
@@ -1605,11 +1637,16 @@ function findOptionBoundary(textContent, qY1, qY2, viewport) {
     const regionItems = optionBins[letter];
     if (regionItems.length > 0) {
       const uniqueItems = [];
+      const seenKeys = new Set();
       for (const it of regionItems) {
-        const isDupe = uniqueItems.some(u =>
-          u.norm === it.norm && Math.abs(u.x - it.x) < 5 && Math.abs(u.y - it.y) < 5
-        );
-        if (!isDupe) uniqueItems.push(it);
+        // Round coordinates to ignore micro-offsets
+        const kx = Math.round(it.x / 2) * 2;
+        const ky = Math.round(it.y / 2) * 2;
+        const key = `${it.norm}|${kx}|${ky}`;
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          uniqueItems.push(it);
+        }
       }
       uniqueItems.sort((a, b) => {
         if (Math.abs(a.y - b.y) > 8) return a.y - b.y;
@@ -1723,6 +1760,9 @@ async function processPdf(pdfDoc) {
     const textContent = await page.getTextContent();
     const regions = detectQuestionRegions(textContent, canvas.width, canvas.height, viewport);
 
+    // Yield control to UI to prevent hanging on giant PDFs
+    await new Promise(resolve => setTimeout(resolve, 0));
+
     for (const region of regions) {
       // Detect where answer options start so we can crop them OUT of the image
       const optData = findOptionBoundary(textContent, region.y1, region.y2, viewport);
@@ -1738,10 +1778,9 @@ async function processPdf(pdfDoc) {
         });
       }
 
-      // Image bottom = just above first option (or full region if no options found)
-      const imageCropBottom = optData.firstOptionY !== null
-        ? Math.max(region.y1 + 40, optData.firstOptionY - GLOBAL_CROP.BOTTOM)
-        : region.y2;
+      // Use the FULL region bottom by default (showing question + options)
+      // This allows the user to manually refine the crop without missing text.
+      const imageCropBottom = region.y2;
 
       const cropX = region.x1 + GLOBAL_CROP.LEFT;
       const cropY = region.y1 + GLOBAL_CROP.TOP;
@@ -1771,6 +1810,11 @@ async function processPdf(pdfDoc) {
         options: ['A', 'B', 'C', 'D'],
         correct: null,
       });
+
+      // Yield control occasionally in the regions loop too
+      if (globalId % 5 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     }
   }
 
